@@ -1,5 +1,8 @@
 module MultiGraphEstimationModels
 
+using LinearAlgebra, Statistics
+using PoissonRandom, Random, StableRNGs
+
 import Base: show
 
 abstract type AbstractEdgeDistribution end
@@ -75,5 +78,65 @@ function Base.show(io::IO, model::MultiGraphModel{DIST,intT,floatT}) where {DIST
 end
 
 export PoissonEdges, NegativeBinomialEdges, MultiGraphModel
+
+function simulate_propensity_model(::PoissonEdges, nnodes::Int; seed::Integer=1903)
+    # initialize RNG
+    rng = StableRNG(seed)
+
+    # draw propensities uniformly from (0, 10)
+    propensity = 10*rand(rng, nnodes)
+
+    # simulate Poisson expectations and data
+    expected = zeros(Float64, nnodes, nnodes)
+    observed = zeros(Int, nnodes, nnodes)
+    for j in 1:nnodes, i in j+1:nnodes
+        μᵢⱼ = propensity[i] * propensity[j]
+        observed[i,j] = observed[j,i] = pois_rand(rng, μᵢⱼ)
+        expected[i,j] = expected[j,i] = μᵢⱼ
+    end
+
+    example = MultiGraphModel(PoissonEdges(), observed)
+    copyto!(example.propensity, propensity)
+    copyto!(example.expected, expected)
+
+    return example
+end
+
+function simulate_covariate_model(::PoissonEdges, nnodes::Int, ncovar::Int; seed::Integer=1903)
+    # initialize RNG
+    rng = StableRNG(seed)
+
+    # simulate p covariates for each of the m nodes; iid N(0,1)
+    design_matrix = randn(rng, ncovar, nnodes)
+
+    # center and scale
+    μ = mean(design_matrix, dims=2)
+    σ = std(design_matrix, dims=2)
+    covariate = (design_matrix .- μ) ./ σ
+
+    # draw effect sizes uniformly from [-3, 3] 
+    coefficient = zeros(ncovar)
+    coefficient[1] = 3*(2*rand(rng)-1)
+    coefficient[2:ncovar] = 1e-1*randn(rng, ncovar-1)
+
+    # simulate propensities
+    propensity = @views [exp(dot(covariate[:,i], coefficient)) for i in 1:nnodes]
+
+    # simulate Poisson expectations and data
+    expected = zeros(Float64, nnodes, nnodes)
+    observed = zeros(Int, nnodes, nnodes)
+    for j in 1:nnodes, i in j+1:nnodes
+        μᵢⱼ = propensity[i] * propensity[j]
+        observed[i,j] = observed[j,i] = pois_rand(rng, μᵢⱼ)
+        expected[i,j] = expected[j,i] = μᵢⱼ
+    end
+
+    example = MultiGraphModel(PoissonEdges(), observed, covariate)
+    copyto!(example.propensity, propensity)
+    copyto!(example.coefficient, coefficient)
+    copyto!(example.expected, expected)
+
+    return example
+end
 
 end # module

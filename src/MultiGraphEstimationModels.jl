@@ -1,0 +1,3 @@
+module MultiGraphEstimationModels
+
+end # module

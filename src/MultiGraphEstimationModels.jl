@@ -1,6 +1,6 @@
 module MultiGraphEstimationModels
 
-using LinearAlgebra, Statistics
+using LinearAlgebra, Statistics, Distributions, SpecialFunctions
 using PoissonRandom, Random, StableRNGs
 
 import Base: show
@@ -27,43 +27,73 @@ function check_covariates(observed, covariates)
     return nothing
 end
 
-allocate_propensities(observed) = zeros(Float64, size(observed, 1))
+function allocate_propensities(observed)
+    p = zeros(Float64, size(observed, 1))
+    m = length(p)
+    sum_x = sum(observed)
+    @. p = sqrt( sum_x / (m * (m-1)) )
+    return p
+end
 
 allocate_expected_matrix(observed::AbstractMatrix) = zeros(Float64, size(observed))
 
 allocate_coefficients(covariates::AbstractMatrix) = zeros(Float64, size(covariates, 1))
 allocate_coefficients(covariates::Nothing) = nothing
 
-struct MultiGraphModel{DIST,intT,floatT,COVARIATE,COEFFICIENT}
+struct MultiGraphModel{DIST,intT,floatT,COVARIATE,COEFFICIENT,PARAMS}
     propensity::Vector{floatT}  # propensity of node i to form an edge
     coefficient::COEFFICIENT    # effect size of covariate j on node propensities
     observed::Matrix{intT}      # edge count data
     expected::Matrix{floatT}    # expected edge counts under statistical model
     covariate::COVARIATE        # nodes × covariates design matrix
-
-    function MultiGraphModel(::DIST, observed, covariate) where DIST
-        # sanity checks
-        check_observed_data(observed)
-        check_covariates(observed, covariate)
-
-        # allocate data structures
-        propensity = allocate_propensities(observed)
-        expected = allocate_expected_matrix(observed)
-        coefficient = allocate_coefficients(covariate)
-
-        # determine type parameters
-        COVARIATE = typeof(covariate)
-        COEFFICIENT = typeof(coefficient)
-        intT = eltype(observed)
-        floatT = eltype(propensity)
-
-        new{DIST,intT,floatT,COVARIATE,COEFFICIENT}(propensity, coefficient, observed, expected, covariate)
-    end
+    parameters::PARAMS          # additional parameters
 end
 
-MultiGraphModel(edge_distribution, observed_data) = MultiGraphModel(edge_distribution, copy(observed_data), nothing)
+function MultiGraphModel(::DIST, observed, covariate, parameters::NamedTuple) where DIST <: AbstractEdgeDistribution
+    # sanity checks
+    check_observed_data(observed)
+    check_covariates(observed, covariate)
 
-MultiGraphModel(edge_distribution, observed_data, covariate_data) = MultiGraphModel(edge_distribution, copy(observed_data), copy(covariate_data))
+    # allocate data structures
+    propensity = allocate_propensities(observed)
+    expected = allocate_expected_matrix(observed)
+    coefficient = allocate_coefficients(covariate)
+
+    # determine type parameters
+    COVARIATE = typeof(covariate)
+    COEFFICIENT = typeof(coefficient)
+    PARAMS = typeof(parameters)
+    intT = eltype(observed)
+    floatT = eltype(propensity)
+
+    model = MultiGraphModel{DIST,intT,floatT,COVARIATE,COEFFICIENT,PARAMS}(propensity, coefficient, observed, expected, covariate, parameters)
+    update_expectations!(model)
+    return model
+end
+
+function MultiGraphModel(dist::AbstractEdgeDistribution, observed)
+    MultiGraphModel(dist, observed, nothing)
+end
+
+function MultiGraphModel(dist::AbstractEdgeDistribution, observed, params::NamedTuple)
+    MultiGraphModel(dist, observed, nothing, params)
+end
+
+function MultiGraphModel(dist::PoissonEdges, observed, covariates)
+    params = (scale=Inf, dispersion=0.0)
+    MultiGraphModel(dist, observed, covariates, params)
+end
+
+function MultiGraphModel(dist::NegativeBinomialEdges, observed, covariates)
+    xbar = mean(observed)
+    s2 = var(observed, mean=xbar)
+    r = xbar^2 / (s2 - xbar)
+    if r < 0
+        @warn "Initialization of scale parameter r using method of moments failed" sample_mean=xbar sample_variance=s2 
+    end
+    params = (scale=r, dispersion=1/r)
+    MultiGraphModel(dist, observed, covariates, params)
+end
 
 function Base.show(io::IO, model::MultiGraphModel{DIST,intT,floatT}) where {DIST,intT,floatT}
     nnodes = length(model.propensity)
@@ -77,7 +107,21 @@ function Base.show(io::IO, model::MultiGraphModel{DIST,intT,floatT}) where {DIST
     return nothing
 end
 
+function update_expectations!(model::MultiGraphModel)
+    p = model.propensity
+    m = length(p)
+    mu = model.expected
+    for j in 1:m, i in 1:m
+        if i == j continue end
+        mu[i,j] = p[i] * p[j]
+    end
+end
+
 export PoissonEdges, NegativeBinomialEdges, MultiGraphModel
+
+#
+#   SIMULATION
+#
 
 function simulate_propensity_model(::PoissonEdges, nnodes::Int; seed::Integer=1903)
     # initialize RNG
@@ -90,12 +134,40 @@ function simulate_propensity_model(::PoissonEdges, nnodes::Int; seed::Integer=19
     expected = zeros(Float64, nnodes, nnodes)
     observed = zeros(Int, nnodes, nnodes)
     for j in 1:nnodes, i in j+1:nnodes
-        μᵢⱼ = propensity[i] * propensity[j]
-        observed[i,j] = observed[j,i] = pois_rand(rng, μᵢⱼ)
-        expected[i,j] = expected[j,i] = μᵢⱼ
+        mu_ij = propensity[i] * propensity[j]
+        observed[i,j] = observed[j,i] = pois_rand(rng, mu_ij)
+        expected[i,j] = expected[j,i] = mu_ij
     end
 
     example = MultiGraphModel(PoissonEdges(), observed)
+    copyto!(example.propensity, propensity)
+    copyto!(example.expected, expected)
+
+    return example
+end
+
+function simulate_propensity_model(::NegativeBinomialEdges, nnodes::Int; dispersion::Real=1.0, seed::Integer=1903)
+    # initialize RNG
+    rng = StableRNG(seed)
+
+    # draw propensities uniformly from (0, 10)
+    propensity = 10*rand(rng, nnodes)
+
+    # set scale parameter, r = 1/dispersion
+    r = 1 / dispersion
+
+    # simulate Poisson expectations and data
+    expected = zeros(Float64, nnodes, nnodes)
+    observed = zeros(Int, nnodes, nnodes)
+    for j in 1:nnodes, i in j+1:nnodes
+        mu_ij = propensity[i] * propensity[j]
+        pi_ij = mu_ij / (mu_ij + r)
+        observed[i,j] = observed[j,i] = rand(rng, NegativeBinomial(r, 1-pi_ij))
+        expected[i,j] = expected[j,i] = mu_ij
+    end
+
+    params = (scale=1/dispersion, dispersion=dispersion)
+    example = MultiGraphModel(NegativeBinomialEdges(), observed, nothing, params)
     copyto!(example.propensity, propensity)
     copyto!(example.expected, expected)
 
@@ -126,9 +198,9 @@ function simulate_covariate_model(::PoissonEdges, nnodes::Int, ncovar::Int; seed
     expected = zeros(Float64, nnodes, nnodes)
     observed = zeros(Int, nnodes, nnodes)
     for j in 1:nnodes, i in j+1:nnodes
-        μᵢⱼ = propensity[i] * propensity[j]
-        observed[i,j] = observed[j,i] = pois_rand(rng, μᵢⱼ)
-        expected[i,j] = expected[j,i] = μᵢⱼ
+        mu_ij = propensity[i] * propensity[j]
+        observed[i,j] = observed[j,i] = pois_rand(rng, mu_ij)
+        expected[i,j] = expected[j,i] = mu_ij
     end
 
     example = MultiGraphModel(PoissonEdges(), observed, covariate)
@@ -137,6 +209,155 @@ function simulate_covariate_model(::PoissonEdges, nnodes::Int, ncovar::Int; seed
     copyto!(example.expected, expected)
 
     return example
+end
+
+export simulate_propensity_model, simulate_covariate_model
+
+#
+#   LIKELIHOOD
+#
+
+function loglikelihood(model::MultiGraphModel{DIST}) where DIST
+    logl = 0.0
+    m = length(model.propensity)
+    for j in 1:m, i in 1:m
+        if i == j continue end
+        x_ij = model.observed[i,j]
+        mu_ij = model.expected[i,j]
+        logl_ij = partial_loglikelihood(DIST(), x_ij, mu_ij, model.parameters)
+        if isnan(logl_ij)
+            error("Detected NaN for edges between $i and $j. $x_ij and $mu_ij")
+        end
+        logl += logl_ij
+    end
+    return logl
+end
+
+function partial_loglikelihood(::PoissonEdges, observed, expected, parameters)
+    return observed * log(expected) - expected - loggamma(observed + 1)
+end
+
+function partial_loglikelihood(::NegativeBinomialEdges, observed, expected, parameters)
+    r = parameters.scale
+    p = expected / (expected + r)
+    return observed*log(p) + r*log1p(-p) - log(observed+r) - logbeta(observed+1, r)
+end
+
+#
+#   MODEL FITTING
+#
+
+function fit(dist::AbstractEdgeDistribution, observed; maxiter::Real=100, tolerance::Real=1e-6)
+    model = MultiGraphModel(dist, observed)
+    init_logl = old_logl = loglikelihood(model)
+    iter = 0
+    converged = false
+
+    for _ in 1:maxiter
+        iter += 1
+
+        # Update propensities and additional parameters.
+        model = update!(model)
+
+        # Evaluate model.
+        logl = loglikelihood(model)
+        increase = logl - old_logl
+        rel_tolerance = tolerance * (1 + abs(old_logl))
+        old_logl = logl
+
+        # Check for ascent and convergence.
+        if increase > 0
+            converged = increase < rel_tolerance
+            if converged
+                break
+            end
+        else
+            @warn "Ascent condition failed; exiting after $(iter) iterations." loglikelihood=old_logl initial=init_logl
+            break
+        end
+    end
+
+    if converged
+        @info "Converged after $(iter) iterations." loglikelihood=old_logl initial=init_logl
+    else
+        @info "Failed to converge after $(iter) iterations." loglikelihood=old_logl initial=init_logl
+    end
+
+    return model
+end
+
+export fit
+
+#
+#   ALGORITHM MAPS
+#
+
+update!(model::MultiGraphModel{DIST}) where DIST = update!(DIST(), model)
+
+function update!(::PoissonEdges, model)
+    p = model.propensity
+    m = length(p)
+    x = model.observed
+
+    # Assume x[i,i] = 0. Is this done in parallel? Ideally we should compute outside function...
+    sum_x = sum(x, dims=2)
+    sum_p = sum(p)
+    old_p = copy(p)
+
+    Threads.@threads for i in 1:m
+        sum_p_i = sum_p - old_p[i]
+        p[i] = sqrt(old_p[i] * sum_x[i] / sum_p_i)
+    end
+
+    update_expectations!(model)
+
+    return model
+end
+
+function update!(::NegativeBinomialEdges, model)
+    p = model.propensity
+    m = length(p)
+    x = model.observed
+    r = model.parameters.scale
+    mu = model.expected
+
+    sum_x = sum(x, dims=2)
+    old_p = copy(p)
+
+    # Update propensities.
+    for j in 1:m
+        denominator = 0.0
+        for i in 1:m
+            # Use symmetry x[i,j] = x[j,i].
+            if i == j continue end
+            denominator += (x[i,j]+r) * old_p[i] / (mu[i,j] + r)
+        end
+        p[j] = sum_x[j] / denominator
+    end
+
+    # Update scale parameter, r.
+    A, B = 0.0, 0.0
+    for j in 1:m, i in 1:m
+        if i == j continue end
+        for k in 0:(x[i,j]-1)
+            A -= r / (r+k)
+        end
+        pi_ij = mu[i,j] / (mu[i,j]+r)
+        B += log1p(-pi_ij) + (mu[i,j] - x[i,j]) / (mu[i,j] + r)
+    end
+    r = A / B
+
+    update_expectations!(model)
+    new_parameters = (scale=r, dispersion=1/r)
+    intT, floatT, COV, COF, PAR = eltype(x), eltype(mu), typeof(model.covariate), typeof(model.coefficient), typeof(new_parameters)
+    return model = MultiGraphModel{NegativeBinomialEdges,intT,floatT,COV,COF,PAR}(
+        model.propensity,
+        model.coefficient,
+        model.observed,
+        model.expected,
+        model.covariate,
+        new_parameters
+    )
 end
 
 end # module

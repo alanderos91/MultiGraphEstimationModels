@@ -7,8 +7,12 @@ import Base: show
 
 abstract type AbstractEdgeDistribution end
 
+@enum NBParam MeanScale MeanDispersion
+
 struct PoissonEdges <: AbstractEdgeDistribution end
-struct NegativeBinomialEdges <: AbstractEdgeDistribution end
+struct NegBinEdges{param} <: AbstractEdgeDistribution end
+
+NegBinEdges(;param=MeanScale) = NegBinEdges{param}()
 
 function check_observed_data(observed)
     !(observed isa AbstractMatrix) && error("Observed data should enter as a matrix (suitable subtype of AbstractMatrix).")
@@ -84,7 +88,7 @@ function MultiGraphModel(dist::PoissonEdges, observed, covariates)
     MultiGraphModel(dist, observed, covariates, params)
 end
 
-function MultiGraphModel(dist::NegativeBinomialEdges, observed, covariates)
+function MultiGraphModel(dist::NegBinEdges, observed, covariates)
     xbar = mean(observed)
     s2 = var(observed, mean=xbar)
     r = xbar^2 / (s2 - xbar)
@@ -117,7 +121,7 @@ function update_expectations!(model::MultiGraphModel)
     end
 end
 
-export PoissonEdges, NegativeBinomialEdges, MultiGraphModel
+export PoissonEdges, NBParam, NegBinEdges, MultiGraphModel
 
 #
 #   SIMULATION
@@ -146,7 +150,7 @@ function simulate_propensity_model(::PoissonEdges, nnodes::Int; seed::Integer=19
     return example
 end
 
-function simulate_propensity_model(::NegativeBinomialEdges, nnodes::Int; dispersion::Real=1.0, seed::Integer=1903)
+function simulate_propensity_model(dist::NegBinEdges, nnodes::Int; dispersion::Real=1.0, seed::Integer=1903)
     # initialize RNG
     rng = StableRNG(seed)
 
@@ -167,7 +171,7 @@ function simulate_propensity_model(::NegativeBinomialEdges, nnodes::Int; dispers
     end
 
     params = (scale=1/dispersion, dispersion=dispersion)
-    example = MultiGraphModel(NegativeBinomialEdges(), observed, nothing, params)
+    example = MultiGraphModel(dist, observed, nothing, params)
     copyto!(example.propensity, propensity)
     copyto!(example.expected, expected)
 
@@ -237,10 +241,16 @@ function partial_loglikelihood(::PoissonEdges, observed, expected, parameters)
     return observed * log(expected) - expected - loggamma(observed + 1)
 end
 
-function partial_loglikelihood(::NegativeBinomialEdges, observed, expected, parameters)
+function partial_loglikelihood(::NegBinEdges{MeanScale}, observed, expected, parameters)
     r = parameters.scale
     p = expected / (expected + r)
     return observed*log(p) + r*log1p(-p) - log(observed+r) - logbeta(observed+1, r)
+end
+
+function partial_loglikelihood(::NegBinEdges{MeanDispersion}, observed, expected, parameters)
+    a = parameters.dispersion
+    p = a*expected / (a*expected + 1)
+    return observed*log(p) + 1/a*log1p(-p) - log(observed+1/a) - logbeta(observed+1, 1/a)
 end
 
 #
@@ -314,7 +324,7 @@ function update!(::PoissonEdges, model)
     return model
 end
 
-function update!(::NegativeBinomialEdges, model)
+function update!(::NegBinEdges{MeanScale}, model)
     p = model.propensity
     m = length(p)
     x = model.observed
@@ -350,7 +360,34 @@ function update!(::NegativeBinomialEdges, model)
     update_expectations!(model)
     new_parameters = (scale=r, dispersion=1/r)
     intT, floatT, COV, COF, PAR = eltype(x), eltype(mu), typeof(model.covariate), typeof(model.coefficient), typeof(new_parameters)
-    return model = MultiGraphModel{NegativeBinomialEdges,intT,floatT,COV,COF,PAR}(
+    return model = MultiGraphModel{NegBinEdges{MeanScale},intT,floatT,COV,COF,PAR}(
+        model.propensity,
+        model.coefficient,
+        model.observed,
+        model.expected,
+        model.covariate,
+        new_parameters
+    )
+end
+
+function update!(::NegBinEdges{MeanDispersion}, model)
+    p = model.propensity
+    m = length(p)
+    x = model.observed
+    a = model.parameters.dispersion
+    mu = model.expected
+
+    sum_x = sum(x, dims=2)
+    old_p = copy(p)
+
+    # Update propensities.
+
+    # Update dispersion parameter, a.
+
+    update_expectations!(model)
+    new_parameters = (scale=1/a, dispersion=a)
+    intT, floatT, COV, COF, PAR = eltype(x), eltype(mu), typeof(model.covariate), typeof(model.coefficient), typeof(new_parameters)
+    return model = MultiGraphModel{NegBinEdges{MeanDispersion},intT,floatT,COV,COF,PAR}(
         model.propensity,
         model.coefficient,
         model.observed,

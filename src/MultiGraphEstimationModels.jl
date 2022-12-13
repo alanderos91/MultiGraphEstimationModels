@@ -89,8 +89,13 @@ function MultiGraphModel(dist::PoissonEdges, observed, covariates)
 end
 
 function MultiGraphModel(dist::NegBinEdges, observed, covariates)
-    xbar = mean(observed)
-    s2 = var(observed, mean=xbar)
+    nzdata = eltype(observed)[]
+    for j in axes(observed, 2), i in axes(observed, 1)
+        if i == j continue end
+        push!(nzdata, observed[i,j])
+    end
+    xbar = mean(nzdata)
+    s2 = var(nzdata, mean=xbar)
     r = xbar^2 / (s2 - xbar)
     if r < 0
         @warn "Initialization of scale parameter r using method of moments failed" sample_mean=xbar sample_variance=s2 
@@ -166,11 +171,12 @@ function simulate_propensity_model(dist::NegBinEdges, nnodes::Int; dispersion::R
     for j in 1:nnodes, i in j+1:nnodes
         mu_ij = propensity[i] * propensity[j]
         pi_ij = mu_ij / (mu_ij + r)
-        observed[i,j] = observed[j,i] = rand(rng, NegativeBinomial(r, 1-pi_ij))
+        D = NegativeBinomial(r, 1-pi_ij)
+        observed[i,j] = observed[j,i] = rand(rng, D)
         expected[i,j] = expected[j,i] = mu_ij
     end
 
-    params = (scale=1/dispersion, dispersion=dispersion)
+    params = (scale=r, dispersion=dispersion)
     example = MultiGraphModel(dist, observed, nothing, params)
     copyto!(example.propensity, propensity)
     copyto!(example.expected, expected)
@@ -244,13 +250,23 @@ end
 function partial_loglikelihood(::NegBinEdges{MeanScale}, observed, expected, parameters)
     r = parameters.scale
     p = expected / (expected + r)
-    return observed*log(p) + r*log1p(-p) - log(observed+r) - logbeta(observed+1, r)
+    if iszero(observed)
+        logl = observed*log(p) + r*log1p(-p)
+    else
+        logl = observed*log(p) + r*log1p(-p) - log(observed+r) - logbeta(observed+1, r)
+    end
+    return logl
 end
 
 function partial_loglikelihood(::NegBinEdges{MeanDispersion}, observed, expected, parameters)
     a = parameters.dispersion
     p = a*expected / (a*expected + 1)
-    return observed*log(p) + 1/a*log1p(-p) - log(observed+1/a) - logbeta(observed+1, 1/a)
+    if iszero(observed)
+        logl = observed*log(p) + 1/a*log1p(-p)
+    else
+        logl = observed*log(p) + 1/a*log1p(-p) - log(observed+1/a) - logbeta(observed+1, 1/a)
+    end
+    return logl
 end
 
 #
@@ -273,16 +289,17 @@ function fit(dist::AbstractEdgeDistribution, observed; maxiter::Real=100, tolera
         logl = loglikelihood(model)
         increase = logl - old_logl
         rel_tolerance = tolerance * (1 + abs(old_logl))
-        old_logl = logl
 
         # Check for ascent and convergence.
         if increase > 0
+            old_logl = logl
             converged = increase < rel_tolerance
             if converged
                 break
             end
         else
-            @warn "Ascent condition failed; exiting after $(iter) iterations." loglikelihood=old_logl initial=init_logl
+            @warn "Ascent condition failed; exiting after $(iter) iterations." loglikelihood=logl previous=old_logl
+            old_logl = logl
             break
         end
     end
@@ -335,15 +352,18 @@ function update!(::NegBinEdges{MeanScale}, model)
     old_p = copy(p)
 
     # Update propensities.
-    for j in 1:m
-        denominator = 0.0
+    storage = zeros(Threads.nthreads())
+    Threads.@threads for j in 1:m
+        t = Threads.threadid()
+        storage[t] = 0
         for i in 1:m
             # Use symmetry x[i,j] = x[j,i].
             if i == j continue end
-            denominator += (x[i,j]+r) * old_p[i] / (mu[i,j] + r)
+            storage[t] += (x[i,j]+r) / (mu[i,j]+r) * old_p[i]
         end
-        p[j] = sum_x[j] / denominator
+        p[j] = sum_x[j] / storage[t]
     end
+    update_expectations!(model)
 
     # Update scale parameter, r.
     A, B = 0.0, 0.0
@@ -381,8 +401,32 @@ function update!(::NegBinEdges{MeanDispersion}, model)
     old_p = copy(p)
 
     # Update propensities.
+    storage = zeros(Threads.nthreads())
+    Threads.@threads for j in 1:m
+        t = Threads.threadid()
+        storage[t] = 0
+        for i in 1:m
+            # Use symmetry x[i,j] = x[j,i].
+            if i == j continue end
+            storage[t] += (a*x[i,j]+1) / (a*mu[i,j]+1) * old_p[i]
+        end
+        p[j] = sum_x[j] / storage[t]
+    end
+    update_expectations!(model)
 
     # Update dispersion parameter, a.
+    A, B = 0.0, 0.0
+    for j in 1:m, i in 1:m
+        if i == j continue end
+        for k in 0:(x[i,j]-1)
+            B -= inv(a) / (inv(a) + k)
+        end
+        pi_ij = a*mu[i,j] / (a*mu[i,j]+1)
+        A -= x[i,j]
+        B -= inv(a) * log1p(-pi_ij) + (x[i,j] + inv(a))*pi_ij
+    end
+    old_a = a
+    a = a * (A / B)
 
     update_expectations!(model)
     new_parameters = (scale=1/a, dispersion=a)

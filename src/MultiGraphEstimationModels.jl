@@ -7,12 +7,17 @@ import Base: show
 
 abstract type AbstractEdgeDistribution end
 
-@enum NBParam MeanScale MeanDispersion
+abstract type NBParam end
+
+struct MeanScale <: NBParam end
+struct MeanDispersion <: NBParam end
 
 struct PoissonEdges <: AbstractEdgeDistribution end
-struct NegBinEdges{param} <: AbstractEdgeDistribution end
 
-NegBinEdges(;param=MeanScale) = NegBinEdges{param}()
+struct NegBinEdges{param<:NBParam} <: AbstractEdgeDistribution end
+
+NegBinEdges(param::T) where T <: NBParam = NegBinEdges{T}()
+NegBinEdges() = NegBinEdges(MeanScale())
 
 function check_observed_data(observed)
     !(observed isa AbstractMatrix) && error("Observed data should enter as a matrix (suitable subtype of AbstractMatrix).")
@@ -126,7 +131,7 @@ function update_expectations!(model::MultiGraphModel)
     end
 end
 
-export PoissonEdges, NBParam, NegBinEdges, MultiGraphModel
+export PoissonEdges, NBParam, MeanScale, MeanDispersion, NegBinEdges, MultiGraphModel
 
 #
 #   SIMULATION
@@ -244,29 +249,21 @@ function loglikelihood(model::MultiGraphModel{DIST}) where DIST
 end
 
 function partial_loglikelihood(::PoissonEdges, observed, expected, parameters)
-    return observed * log(expected) - expected - loggamma(observed + 1)
+    return logpdf(Poisson(expected), observed)
 end
 
 function partial_loglikelihood(::NegBinEdges{MeanScale}, observed, expected, parameters)
+    # r failures, p is probability of failures
     r = parameters.scale
     p = expected / (expected + r)
-    if iszero(observed)
-        logl = observed*log(p) + r*log1p(-p)
-    else
-        logl = observed*log(p) + r*log1p(-p) - log(observed+r) - logbeta(observed+1, r)
-    end
-    return logl
+    # Distributions.jl treats r as number of successes, so need to flip probability
+    return logpdf(NegativeBinomial(r, 1-p), observed)
 end
 
 function partial_loglikelihood(::NegBinEdges{MeanDispersion}, observed, expected, parameters)
     a = parameters.dispersion
     p = a*expected / (a*expected + 1)
-    if iszero(observed)
-        logl = observed*log(p) + 1/a*log1p(-p)
-    else
-        logl = observed*log(p) + 1/a*log1p(-p) - log(observed+1/a) - logbeta(observed+1, 1/a)
-    end
-    return logl
+    return logpdf(NegativeBinomial(inv(a), 1-p), observed)
 end
 
 #
@@ -378,7 +375,7 @@ function update!(::NegBinEdges{MeanScale}, model)
     r = A / B
 
     update_expectations!(model)
-    new_parameters = (scale=r, dispersion=1/r)
+    new_parameters = (scale=r, dispersion=inv(r))
     intT, floatT, COV, COF, PAR = eltype(x), eltype(mu), typeof(model.covariate), typeof(model.coefficient), typeof(new_parameters)
     return model = MultiGraphModel{NegBinEdges{MeanScale},intT,floatT,COV,COF,PAR}(
         model.propensity,
@@ -425,11 +422,10 @@ function update!(::NegBinEdges{MeanDispersion}, model)
         A -= x[i,j]
         B -= inv(a) * log1p(-pi_ij) + (x[i,j] + inv(a))*pi_ij
     end
-    old_a = a
     a = a * (A / B)
 
     update_expectations!(model)
-    new_parameters = (scale=1/a, dispersion=a)
+    new_parameters = (scale=inv(a), dispersion=a)
     intT, floatT, COV, COF, PAR = eltype(x), eltype(mu), typeof(model.covariate), typeof(model.coefficient), typeof(new_parameters)
     return model = MultiGraphModel{NegBinEdges{MeanDispersion},intT,floatT,COV,COF,PAR}(
         model.propensity,

@@ -270,7 +270,11 @@ end
 #   MODEL FITTING
 #
 
-function fit(dist::AbstractEdgeDistribution, observed; maxiter::Real=100, tolerance::Real=1e-6)
+function fit_model(dist::AbstractEdgeDistribution, observed;
+    maxiter::Real=100,
+    tolerance::Real=1e-6
+)
+    #
     model = MultiGraphModel(dist, observed)
     init_logl = old_logl = loglikelihood(model)
     iter = 0
@@ -310,7 +314,7 @@ function fit(dist::AbstractEdgeDistribution, observed; maxiter::Real=100, tolera
     return model
 end
 
-export fit
+export fit_model
 
 #
 #   ALGORITHM MAPS

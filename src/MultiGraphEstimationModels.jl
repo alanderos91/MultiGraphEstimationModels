@@ -270,12 +270,27 @@ end
 #   MODEL FITTING
 #
 
-function fit_model(dist::AbstractEdgeDistribution, observed;
-    maxiter::Real=100,
-    tolerance::Real=1e-6
-)
+# Case: PoissonEdges, no covariates
+function __allocate_buffers__(::PoissonEdges, p, ::Nothing)
+    buffers = (;
+        sum_x=zeros(Int, length(p)),
+        old_p=similar(p)
+    )
+    return buffers
+end
+
+# Case: NegBinEdges, no covariates
+function __allocate_buffers__(::NegBinEdges, p, ::Nothing)
+    buffers = (;
+        sum_x=zeros(Int, length(p)),
+        old_p=similar(p),
+        threads_buffer=zeros(Threads.nthreads())
+    )
+    return buffers
+end
+
+function __mle_loop__(model, buffers, maxiter, tolerance)
     #
-    model = MultiGraphModel(dist, observed)
     init_logl = old_logl = loglikelihood(model)
     iter = 0
     converged = false
@@ -284,7 +299,7 @@ function fit_model(dist::AbstractEdgeDistribution, observed;
         iter += 1
 
         # Update propensities and additional parameters.
-        model = update!(model)
+        model = update!(model, buffers)
 
         # Evaluate model.
         logl = loglikelihood(model)
@@ -314,23 +329,41 @@ function fit_model(dist::AbstractEdgeDistribution, observed;
     return model
 end
 
+function fit_model(dist::AbstractEdgeDistribution, observed; kwargs...)
+    #
+    model = MultiGraphModel(dist, observed)
+    fit_model(model; kwargs...)
+end
+
+function fit_model(dist::AbstractEdgeDistribution, observed, covariates; kwargs...)
+    #
+    model = MultiGraphModel(dist, observed, covariates)
+    fit_model(model; kwargs...)
+end
+
+function fit_model(model::MultiGraphModel{DIST}; maxiter::Real=100, tolerance::Real=1e-6) where DIST
+    buffers = __allocate_buffers__(DIST(), model.propensity, model.covariate)
+    __mle_loop__(model, buffers, maxiter, tolerance)
+end
+
 export fit_model
 
 #
 #   ALGORITHM MAPS
 #
 
-update!(model::MultiGraphModel{DIST}) where DIST = update!(DIST(), model)
+update!(model::MultiGraphModel{DIST}, buffers) where DIST = update!(DIST(), model.covariate, model, buffers)
 
-function update!(::PoissonEdges, model)
+# Case: PoissonEdges, no covariates
+function update!(::PoissonEdges, ::Nothing, model, buffers)
     p = model.propensity
     m = length(p)
     x = model.observed
 
     # Assume x[i,i] = 0. Is this done in parallel? Ideally we should compute outside function...
-    sum_x = sum(x, dims=2)
+    sum_x = sum!(buffers.sum_x, x)
     sum_p = sum(p)
-    old_p = copy(p)
+    old_p = copyto!(buffers.old_p, p)
 
     Threads.@threads for i in 1:m
         sum_p_i = sum_p - old_p[i]
@@ -342,18 +375,19 @@ function update!(::PoissonEdges, model)
     return model
 end
 
-function update!(::NegBinEdges{MeanScale}, model)
+# Case: NegBinEdges, mean-scale, no covariates
+function update!(::NegBinEdges{MeanScale}, ::Nothing, model, buffers)
     p = model.propensity
     m = length(p)
     x = model.observed
     r = model.parameters.scale
     mu = model.expected
 
-    sum_x = sum(x, dims=2)
-    old_p = copy(p)
+    sum_x = sum!(buffers.sum_x, x)
+    old_p = copyto!(buffers.old_p, p)
+    storage = buffers.threads_buffer
 
     # Update propensities.
-    storage = zeros(Threads.nthreads())
     Threads.@threads for j in 1:m
         t = Threads.threadid()
         storage[t] = 0
@@ -391,18 +425,19 @@ function update!(::NegBinEdges{MeanScale}, model)
     )
 end
 
-function update!(::NegBinEdges{MeanDispersion}, model)
+# Case: NegBinEdges, mean-dispersion, no covariates
+function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
     p = model.propensity
     m = length(p)
     x = model.observed
     a = model.parameters.dispersion
     mu = model.expected
 
-    sum_x = sum(x, dims=2)
-    old_p = copy(p)
+    sum_x = sum!(buffers.sum_x, x)
+    old_p = copyto!(buffers.old_p, p)
+    storage = buffers.threads_buffer
 
     # Update propensities.
-    storage = zeros(Threads.nthreads())
     Threads.@threads for j in 1:m
         t = Threads.threadid()
         storage[t] = 0

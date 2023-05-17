@@ -123,9 +123,8 @@ end
 
 function update_expectations!(model::MultiGraphModel)
     p = model.propensity
-    m = length(p)
     mu = model.expected
-    for j in 1:m, i in 1:m
+    for j in eachindex(p), i in eachindex(p)
         if i == j continue end
         mu[i,j] = p[i] * p[j]
     end
@@ -232,10 +231,10 @@ export simulate_propensity_model, simulate_covariate_model
 #   LIKELIHOOD
 #
 
-function loglikelihood(model::MultiGraphModel{DIST}) where DIST
+function eval_loglikelihood(model::MultiGraphModel{DIST}) where DIST
     logl = 0.0
-    m = length(model.propensity)
-    for j in 1:m, i in 1:m
+    p = model.propensity
+    for j in eachindex(p), i in eachindex(p)
         if i == j continue end
         x_ij = model.observed[i,j]
         mu_ij = model.expected[i,j]
@@ -291,7 +290,7 @@ end
 
 function __mle_loop__(model, buffers, maxiter, tolerance)
     #
-    init_logl = old_logl = loglikelihood(model)
+    init_logl = old_logl = eval_loglikelihood(model)
     iter = 0
     converged = false
 
@@ -302,7 +301,7 @@ function __mle_loop__(model, buffers, maxiter, tolerance)
         model = update!(model, buffers)
 
         # Evaluate model.
-        logl = loglikelihood(model)
+        logl = eval_loglikelihood(model)
         increase = logl - old_logl
         rel_tolerance = tolerance * (1 + abs(old_logl))
 
@@ -357,7 +356,6 @@ update!(model::MultiGraphModel{DIST}, buffers) where DIST = update!(DIST(), mode
 # Case: PoissonEdges, no covariates
 function update!(::PoissonEdges, ::Nothing, model, buffers)
     p = model.propensity
-    m = length(p)
     x = model.observed
 
     # Assume x[i,i] = 0. Is this done in parallel? Ideally we should compute outside function...
@@ -365,7 +363,7 @@ function update!(::PoissonEdges, ::Nothing, model, buffers)
     sum_p = sum(p)
     old_p = copyto!(buffers.old_p, p)
 
-    Threads.@threads for i in 1:m
+    Threads.@threads for i in eachindex(p)
         sum_p_i = sum_p - old_p[i]
         p[i] = sqrt(old_p[i] * sum_x[i] / sum_p_i)
     end
@@ -378,7 +376,6 @@ end
 # Case: NegBinEdges, mean-scale, no covariates
 function update!(::NegBinEdges{MeanScale}, ::Nothing, model, buffers)
     p = model.propensity
-    m = length(p)
     x = model.observed
     r = model.parameters.scale
     mu = model.expected
@@ -388,10 +385,10 @@ function update!(::NegBinEdges{MeanScale}, ::Nothing, model, buffers)
     storage = buffers.threads_buffer
 
     # Update propensities.
-    Threads.@threads for j in 1:m
+    Threads.@threads for j in eachindex(p)
         t = Threads.threadid()
         storage[t] = 0
-        for i in 1:m
+        for i in eachindex(p)
             # Use symmetry x[i,j] = x[j,i].
             if i == j continue end
             storage[t] += (x[i,j]+r) / (mu[i,j]+r) * old_p[i]
@@ -402,20 +399,20 @@ function update!(::NegBinEdges{MeanScale}, ::Nothing, model, buffers)
 
     # Update scale parameter, r.
     A, B = 0.0, 0.0
-    for j in 1:m, i in 1:m
+    for j in eachindex(p), i in eachindex(p)
         if i == j continue end
         for k in 0:(x[i,j]-1)
-            A -= r / (r+k)
+            A = A - r / (r+k)
         end
         pi_ij = mu[i,j] / (mu[i,j]+r)
         B += log1p(-pi_ij) + (mu[i,j] - x[i,j]) / (mu[i,j] + r)
     end
-    r = A / B
+    new_r = A / B
 
     update_expectations!(model)
-    new_parameters = (scale=r, dispersion=inv(r))
+    new_parameters = (scale=new_r, dispersion=inv(new_r))
     intT, floatT, COV, COF, PAR = eltype(x), eltype(mu), typeof(model.covariate), typeof(model.coefficient), typeof(new_parameters)
-    return model = MultiGraphModel{NegBinEdges{MeanScale},intT,floatT,COV,COF,PAR}(
+    return MultiGraphModel{NegBinEdges{MeanScale},intT,floatT,COV,COF,PAR}(
         model.propensity,
         model.coefficient,
         model.observed,
@@ -428,7 +425,6 @@ end
 # Case: NegBinEdges, mean-dispersion, no covariates
 function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
     p = model.propensity
-    m = length(p)
     x = model.observed
     a = model.parameters.dispersion
     mu = model.expected
@@ -438,10 +434,10 @@ function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
     storage = buffers.threads_buffer
 
     # Update propensities.
-    Threads.@threads for j in 1:m
+    Threads.@threads for j in eachindex(p)
         t = Threads.threadid()
         storage[t] = 0
-        for i in 1:m
+        for i in eachindex(p)
             # Use symmetry x[i,j] = x[j,i].
             if i == j continue end
             storage[t] += (a*x[i,j]+1) / (a*mu[i,j]+1) * old_p[i]
@@ -452,7 +448,7 @@ function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
 
     # Update dispersion parameter, a.
     A, B = 0.0, 0.0
-    for j in 1:m, i in 1:m
+    for j in eachindex(p), i in eachindex(p)
         if i == j continue end
         for k in 0:(x[i,j]-1)
             B -= inv(a) / (inv(a) + k)
@@ -461,12 +457,12 @@ function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
         A -= x[i,j]
         B -= inv(a) * log1p(-pi_ij) + (x[i,j] + inv(a))*pi_ij
     end
-    a = a * (A / B)
+    new_a = a * (A / B)
 
     update_expectations!(model)
-    new_parameters = (scale=inv(a), dispersion=a)
+    new_parameters = (scale=inv(new_a), dispersion=new_a)
     intT, floatT, COV, COF, PAR = eltype(x), eltype(mu), typeof(model.covariate), typeof(model.coefficient), typeof(new_parameters)
-    return model = MultiGraphModel{NegBinEdges{MeanDispersion},intT,floatT,COV,COF,PAR}(
+    return MultiGraphModel{NegBinEdges{MeanDispersion},intT,floatT,COV,COF,PAR}(
         model.propensity,
         model.coefficient,
         model.observed,

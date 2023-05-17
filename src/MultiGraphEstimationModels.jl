@@ -124,9 +124,13 @@ end
 function update_expectations!(model::MultiGraphModel)
     p = model.propensity
     mu = model.expected
-    for j in eachindex(p), i in eachindex(p)
-        if i == j continue end
-        mu[i,j] = p[i] * p[j]
+    Threads.@threads for j in eachindex(p)
+        p_j = p[j]
+        v = view(mu, :, j)
+        for i in eachindex(p)
+            if i == j continue end
+            v[i] = p[i] * p_j
+        end
     end
 end
 
@@ -245,19 +249,30 @@ export simulate_propensity_model, simulate_covariate_model
 #
 
 function eval_loglikelihood(model::MultiGraphModel{DIST}) where DIST
-    logl = 0.0
+    __eval_loglikelihood_threaded__(model, zeros(Threads.nthreads()))
+end
+
+function eval_loglikelihood(model::MultiGraphModel{DIST}, buffers) where DIST
+    __eval_loglikelihood_threaded__(model, buffers.threads_buffers[1])
+end
+
+function __eval_loglikelihood_threaded__(model::MultiGraphModel{DIST}, buffer) where DIST
+    fill!(buffer, 0)
     p = model.propensity
-    for j in eachindex(p), i in eachindex(p)
-        if i == j continue end
-        x_ij = model.observed[i,j]
-        mu_ij = model.expected[i,j]
-        logl_ij = partial_loglikelihood(DIST(), x_ij, mu_ij, model.parameters)
-        if isnan(logl_ij)
-            error("Detected NaN for edges between $i and $j. $x_ij and $mu_ij")
+    Threads.@threads for j in eachindex(p)
+        t = Threads.threadid()
+        for i in eachindex(p)
+            if i == j continue end
+            x_ij = model.observed[i,j]
+            mu_ij = model.expected[i,j]
+            logl_ij = partial_loglikelihood(DIST(), x_ij, mu_ij, model.parameters)
+            if isnan(logl_ij)
+                error("Detected NaN for edges between $i and $j. $x_ij and $mu_ij")
+            end
+            buffer[t] += logl_ij
         end
-        logl += logl_ij
     end
-    return logl
+    return sum(buffer)
 end
 
 function partial_loglikelihood(::PoissonEdges, observed, expected, parameters)
@@ -286,7 +301,8 @@ end
 function __allocate_buffers__(::PoissonEdges, p, ::Nothing)
     buffers = (;
         sum_x=zeros(Int, length(p)),
-        old_p=similar(p)
+        old_p=similar(p),
+        threads_buffers=[zeros(Threads.nthreads()) for _ in 1:1]
     )
     return buffers
 end
@@ -302,10 +318,12 @@ function __allocate_buffers__(::NegBinEdges, p, ::Nothing)
 end
 
 function __mle_loop__(model, buffers, maxiter, tolerance)
-    #
-    init_logl = old_logl = eval_loglikelihood(model)
+    # initialize constants
+    sum!(buffers.sum_x, model.observed)
+
+    init_logl = old_logl = eval_loglikelihood(model, buffers)
     iter = 0
-    converged = false
+    converged = false    
 
     for _ in 1:maxiter
         iter += 1
@@ -314,7 +332,7 @@ function __mle_loop__(model, buffers, maxiter, tolerance)
         model = update!(model, buffers)
 
         # Evaluate model.
-        logl = eval_loglikelihood(model)
+        logl = eval_loglikelihood(model, buffers)
         increase = logl - old_logl
         rel_tolerance = tolerance * (1 + abs(old_logl))
 
@@ -382,10 +400,8 @@ update!(model::MultiGraphModel{DIST}, buffers) where DIST = update!(DIST(), mode
 # Case: PoissonEdges, no covariates
 function update!(::PoissonEdges, ::Nothing, model, buffers)
     p = model.propensity
-    x = model.observed
 
-    # Assume x[i,i] = 0. Is this done in parallel? Ideally we should compute outside function...
-    sum_x = sum!(buffers.sum_x, x)
+    sum_x = buffers.sum_x
     sum_p = sum(p)
     old_p = copyto!(buffers.old_p, p)
 
@@ -406,7 +422,7 @@ function update!(::NegBinEdges{MeanScale}, ::Nothing, model, buffers)
     r = model.parameters.scale
     mu = model.expected
 
-    sum_x = sum!(buffers.sum_x, x)
+    sum_x = buffers.sum_x
     old_p = copyto!(buffers.old_p, p)
     storage = buffers.threads_buffers[1]
 
@@ -452,7 +468,7 @@ function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
     a = model.parameters.dispersion
     mu = model.expected
 
-    sum_x = sum!(buffers.sum_x, x)
+    sum_x = buffers.sum_x
     old_p = copyto!(buffers.old_p, p)
     storage = buffers.threads_buffers[1]
 

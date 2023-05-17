@@ -130,10 +130,10 @@ function update_expectations!(model::MultiGraphModel)
     end
 end
 
-function remake_model!(model, new_params)
+function remake_model!(model::MultiGraphModel{DIST}, new_params) where DIST
     intT, floatT = eltype(model.observed), eltype(model.expected)
     COV, COF, PAR = typeof(model.covariate), typeof(model.coefficient), typeof(new_params)
-    return MultiGraphModel{NegBinEdges{MeanDispersion},intT,floatT,COV,COF,PAR}(
+    return MultiGraphModel{DIST,intT,floatT,COV,COF,PAR}(
         model.propensity,
         model.coefficient,
         model.observed,

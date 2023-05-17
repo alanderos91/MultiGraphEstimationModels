@@ -122,6 +122,19 @@ function Base.show(io::IO, model::MultiGraphModel{DIST,intT,floatT}) where {DIST
 end
 
 function update_expectations!(model::MultiGraphModel)
+    update_expectations!(model, model.covariate)
+end
+
+function update_expectations!(model::MultiGraphModel, ::Any)
+    p = model.propensity
+    Z = model.covariate
+    b = model.coefficient
+    mul!(p, transpose(Z), b)
+    @. p = exp(p)
+    update_expectations!(model, nothing)
+end
+
+function update_expectations!(model::MultiGraphModel, ::Nothing)
     p = model.propensity
     mu = model.expected
     Threads.@threads for j in eachindex(p)
@@ -248,14 +261,38 @@ export simulate_propensity_model, simulate_covariate_model
 #   LIKELIHOOD
 #
 
+# no buffers
 function eval_loglikelihood(model::MultiGraphModel{DIST}) where DIST
+    eval_loglikelihood(model, model.covariate, nothing)
+end
+
+# with buffers
+function eval_loglikelihood(model::MultiGraphModel{DIST}, buffers) where DIST
+    eval_loglikelihood(model, model.covariate, buffers)
+end
+
+# no covariates, allocate buffers
+function eval_loglikelihood(model::MultiGraphModel{DIST}, ::Nothing, ::Nothing) where DIST
     __eval_loglikelihood_threaded__(model, zeros(Threads.nthreads()))
 end
 
-function eval_loglikelihood(model::MultiGraphModel{DIST}, buffers) where DIST
+# with covariates, allocate buffers
+function eval_loglikelihood(model::MultiGraphModel{DIST}, Z, ::Nothing) where DIST
+    buffers = __allocate_buffers__(DIST(), model.propensity, Z)
+    __eval_loglikelihood_and_derivs_threaded__(model, buffers)
+end
+
+# no covariates, with buffers
+function eval_loglikelihood(model::MultiGraphModel{DIST}, ::Nothing, buffers) where DIST
     __eval_loglikelihood_threaded__(model, buffers.threads_buffers[1])
 end
 
+# with covariates, with buffers
+function eval_loglikelihood(model::MultiGraphModel{DIST}, Z, buffers) where DIST
+    __eval_loglikelihood_and_derivs_threaded__(model, buffers)
+end
+
+# no covariates
 function __eval_loglikelihood_threaded__(model::MultiGraphModel{DIST}, buffer) where DIST
     fill!(buffer, 0)
     p = model.propensity
@@ -275,6 +312,45 @@ function __eval_loglikelihood_threaded__(model::MultiGraphModel{DIST}, buffer) w
     return sum(buffer)
 end
 
+# with covariates
+function __eval_loglikelihood_and_derivs_threaded__(model::MultiGraphModel{DIST}, buffers) where DIST
+    logl = fill!(buffers.threads_buffers[1], 0)
+    d1f = buffers.threads_gradient
+    d2f = buffers.threads_hessian
+    tmp = buffers.threads_tmp
+    foreach(Base.Fix2(fill!, 0), d1f)
+    foreach(Base.Fix2(fill!, 0), d2f)
+
+    p = model.propensity
+    covariates = model.covariate
+    Threads.@threads for j in eachindex(p)
+        t = Threads.threadid()
+        zj = view(covariates, :, j)
+        for i in eachindex(p)
+            if i == j continue end
+            x_ij = model.observed[i,j]
+            mu_ij = model.expected[i,j]
+            zi = view(covariates, :, i)
+            logl_ij = partial_loglikelihood(DIST(), x_ij, mu_ij, model.parameters)
+            if isnan(logl_ij)
+                error("Detected NaN for edges between $i and $j. $x_ij and $mu_ij")
+            end
+            logl[t] += logl_ij
+            partial_gradient!(DIST(), d1f[t], tmp[t], x_ij, mu_ij, zi, zj)
+            partial_hessian!(DIST(), d2f[t], tmp[t], x_ij, mu_ij, zi, zj)
+        end
+    end
+
+    T = eltype(p)
+    fill!(buffers.gradient, 0)
+    fill!(buffers.hessian, 0)
+    for k in eachindex(d1f)
+        axpy!(one(T), d1f[k], buffers.gradient)
+        axpy!(-one(T), d2f[k], buffers.hessian)
+    end
+    return sum(logl)
+end
+
 function partial_loglikelihood(::PoissonEdges, observed, expected, parameters)
     return logpdf(Poisson(expected), observed)
 end
@@ -291,6 +367,27 @@ function partial_loglikelihood(::NegBinEdges{MeanDispersion}, observed, expected
     a = parameters.dispersion
     p = a*expected / (a*expected + 1)
     return logpdf(NegativeBinomial(inv(a), 1-p), observed)
+end
+
+function partial_gradient!(::PoissonEdges, d1f, tmp, observed, expected, zi, zj)
+    α = observed - expected
+    @. tmp = zi + zj
+    
+    # update ∇logl = ∇logl + α(xᵢ+xⱼ)
+    axpy!(α, tmp, d1f)
+
+    return d1f
+end
+
+function partial_hessian!(::PoissonEdges, d2f, tmp, observed, expected, zi, zj)
+    α = -expected
+    @. tmp = zi + zj
+    
+    # update ∇²logl = ∇²logl + α (xᵢ+xⱼ) (xᵢ+xⱼ)ᵀ
+    # only on the upper triangular half
+    BLAS.syr!('L', α, tmp, d2f)
+
+    return d2f
 end
 
 #
@@ -313,6 +410,24 @@ function __allocate_buffers__(::NegBinEdges, p, ::Nothing)
         sum_x=zeros(Int, length(p)),
         old_p=similar(p),
         threads_buffers=[zeros(Threads.nthreads()) for _ in 1:2],
+    )
+    return buffers
+end
+
+# Case: PoissonEdges, with covariates
+function __allocate_buffers__(::PoissonEdges, p, Z::AbstractMatrix)
+    ncovars = size(Z, 1)
+    nt = Threads.nthreads()
+    buffers = (;
+        sum_x=zeros(Int, length(p)),
+        old_p=similar(p),
+        newton_direction=zeros(ncovars),
+        gradient=zeros(ncovars),
+        hessian=zeros(ncovars, ncovars),
+        threads_buffers=[zeros(Threads.nthreads()) for _ in 1:1],
+        threads_gradient=[zeros(ncovars) for _ in 1:nt],
+        threads_hessian=[zeros(ncovars, ncovars) for _ in 1:nt],
+        threads_tmp=[zeros(ncovars) for _ in 1:nt],
     )
     return buffers
 end
@@ -506,6 +621,25 @@ function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
     update_expectations!(model)
     new_parameters = (scale=inv(new_a), dispersion=new_a)
     return remake_model!(model, new_parameters)
+end
+
+# Case: PoissonEdges, with covariates
+function update!(::PoissonEdges, ::AbstractMatrix, model, buffers)
+    p = model.propensity
+    b = model.coefficient
+    v = buffers.newton_direction
+    d1f = buffers.gradient
+    d2f = buffers.hessian
+    T = eltype(v)
+
+    # Update propensities with Newton's method
+    cholH = cholesky!(Symmetric(d2f, :L))
+    ldiv!(v, cholH, d1f)
+    axpy!(one(T), v, b)
+
+    update_expectations!(model)
+
+    return model
 end
 
 end # module

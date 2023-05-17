@@ -130,6 +130,19 @@ function update_expectations!(model::MultiGraphModel)
     end
 end
 
+function remake_model!(model, new_params)
+    intT, floatT = eltype(model.observed), eltype(model.expected)
+    COV, COF, PAR = typeof(model.covariate), typeof(model.coefficient), typeof(new_params)
+    return MultiGraphModel{NegBinEdges{MeanDispersion},intT,floatT,COV,COF,PAR}(
+        model.propensity,
+        model.coefficient,
+        model.observed,
+        model.expected,
+        model.covariate,
+        new_params,
+    )
+end
+
 export PoissonEdges, NBParam, MeanScale, MeanDispersion, NegBinEdges, MultiGraphModel
 
 #
@@ -328,6 +341,18 @@ function __mle_loop__(model, buffers, maxiter, tolerance)
     return model
 end
 
+init_model(::PoissonEdges, model) = model
+
+function init_model(::NegBinEdges, model)
+    init = MultiGraphModel(PoissonEdges(), model.observed, model.covariate)
+    copyto!(init.propensity, model.propensity)
+    update_expectations!(init)
+    init = fit_model(init)
+    copyto!(model.propensity, init.propensity)
+    update_expectations!(model)
+    return model
+end
+
 function fit_model(dist::AbstractEdgeDistribution, observed; kwargs...)
     #
     model = MultiGraphModel(dist, observed)
@@ -342,6 +367,7 @@ end
 
 function fit_model(model::MultiGraphModel{DIST}; maxiter::Real=100, tolerance::Real=1e-6) where DIST
     buffers = __allocate_buffers__(DIST(), model.propensity, model.covariate)
+    model = init_model(DIST(), model)
     __mle_loop__(model, buffers, maxiter, tolerance)
 end
 
@@ -416,15 +442,7 @@ function update!(::NegBinEdges{MeanScale}, ::Nothing, model, buffers)
 
     update_expectations!(model)
     new_parameters = (scale=new_r, dispersion=inv(new_r))
-    intT, floatT, COV, COF, PAR = eltype(x), eltype(mu), typeof(model.covariate), typeof(model.coefficient), typeof(new_parameters)
-    return MultiGraphModel{NegBinEdges{MeanScale},intT,floatT,COV,COF,PAR}(
-        model.propensity,
-        model.coefficient,
-        model.observed,
-        model.expected,
-        model.covariate,
-        new_parameters
-    )
+    return remake_model!(model, new_parameters)
 end
 
 # Case: NegBinEdges, mean-dispersion, no covariates
@@ -471,15 +489,7 @@ function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
 
     update_expectations!(model)
     new_parameters = (scale=inv(new_a), dispersion=new_a)
-    intT, floatT, COV, COF, PAR = eltype(x), eltype(mu), typeof(model.covariate), typeof(model.coefficient), typeof(new_parameters)
-    return MultiGraphModel{NegBinEdges{MeanDispersion},intT,floatT,COV,COF,PAR}(
-        model.propensity,
-        model.coefficient,
-        model.observed,
-        model.expected,
-        model.covariate,
-        new_parameters
-    )
+    return remake_model!(model, new_parameters)
 end
 
 end # module

@@ -283,7 +283,7 @@ function __allocate_buffers__(::NegBinEdges, p, ::Nothing)
     buffers = (;
         sum_x=zeros(Int, length(p)),
         old_p=similar(p),
-        threads_buffer=zeros(Threads.nthreads())
+        threads_buffers=[zeros(Threads.nthreads()) for _ in 1:2],
     )
     return buffers
 end
@@ -382,7 +382,7 @@ function update!(::NegBinEdges{MeanScale}, ::Nothing, model, buffers)
 
     sum_x = sum!(buffers.sum_x, x)
     old_p = copyto!(buffers.old_p, p)
-    storage = buffers.threads_buffer
+    storage = buffers.threads_buffers[1]
 
     # Update propensities.
     Threads.@threads for j in eachindex(p)
@@ -398,16 +398,21 @@ function update!(::NegBinEdges{MeanScale}, ::Nothing, model, buffers)
     update_expectations!(model)
 
     # Update scale parameter, r.
-    A, B = 0.0, 0.0
-    for j in eachindex(p), i in eachindex(p)
-        if i == j continue end
-        for k in 0:(x[i,j]-1)
-            A = A - r / (r+k)
+    A = fill!(buffers.threads_buffers[1], 0)
+    B = fill!(buffers.threads_buffers[2], 0)
+    digamma_r = digamma(r)
+    Threads.@threads for j in eachindex(p)
+        t = Threads.threadid()
+        u = view(x, :, j)
+        v = view(mu, :, j)
+        for i in eachindex(p)
+            if i == j continue end
+            pi_ij = v[i] / (v[i]+r)
+            A[t] -= r*(digamma(u[i]+r) - digamma_r)
+            B[t] += log1p(-pi_ij) + (v[i] - u[i]) / (v[i] + r)
         end
-        pi_ij = mu[i,j] / (mu[i,j]+r)
-        B += log1p(-pi_ij) + (mu[i,j] - x[i,j]) / (mu[i,j] + r)
     end
-    new_r = A / B
+    new_r = sum(A) / sum(B)
 
     update_expectations!(model)
     new_parameters = (scale=new_r, dispersion=inv(new_r))
@@ -431,7 +436,7 @@ function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
 
     sum_x = sum!(buffers.sum_x, x)
     old_p = copyto!(buffers.old_p, p)
-    storage = buffers.threads_buffer
+    storage = buffers.threads_buffers[1]
 
     # Update propensities.
     Threads.@threads for j in eachindex(p)
@@ -447,17 +452,22 @@ function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
     update_expectations!(model)
 
     # Update dispersion parameter, a.
-    A, B = 0.0, 0.0
-    for j in eachindex(p), i in eachindex(p)
-        if i == j continue end
-        for k in 0:(x[i,j]-1)
-            B -= inv(a) / (inv(a) + k)
+    A = fill!(buffers.threads_buffers[1], 0)
+    B = fill!(buffers.threads_buffers[2], 0)
+    digamma_inva = digamma(inv(a))
+    Threads.@threads for j in eachindex(p)
+        t = Threads.threadid()
+        u = view(x, :, j)
+        v = view(mu, :, j)
+        for i in eachindex(p)
+            if i == j continue end
+            pi_ij = a*v[i] / (a*v[i]+1)
+            A[t] -= u[i]
+            B[t] -= inv(a)*(digamma(u[i]+inv(a)) - digamma_inva)
+            B[t] -= inv(a) * log1p(-pi_ij) + (u[i] + inv(a))*pi_ij
         end
-        pi_ij = a*mu[i,j] / (a*mu[i,j]+1)
-        A -= x[i,j]
-        B -= inv(a) * log1p(-pi_ij) + (x[i,j] + inv(a))*pi_ij
     end
-    new_a = a * (A / B)
+    new_a = a * (sum(A) / sum(B))
 
     update_expectations!(model)
     new_parameters = (scale=inv(new_a), dispersion=new_a)

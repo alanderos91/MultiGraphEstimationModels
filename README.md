@@ -1,37 +1,42 @@
 # MultiGraphEstimationModels.jl
 
+<!--
 ![Lifecycle](https://img.shields.io/badge/lifecycle-experimental-orange.svg)<!--
 ![Lifecycle](https://img.shields.io/badge/lifecycle-maturing-blue.svg)
 ![Lifecycle](https://img.shields.io/badge/lifecycle-stable-green.svg)
 ![Lifecycle](https://img.shields.io/badge/lifecycle-retired-orange.svg)
 ![Lifecycle](https://img.shields.io/badge/lifecycle-archived-red.svg)
-![Lifecycle](https://img.shields.io/badge/lifecycle-dormant-blue.svg) -->
+![Lifecycle](https://img.shields.io/badge/lifecycle-dormant-blue.svg)
 [![Build Status](https://travis-ci.com/alanderos91/MultiGraphEstimationModels.jl.svg?branch=master)](https://travis-ci.com/alanderos91/MultiGraphEstimationModels.jl)
 [![codecov.io](http://codecov.io/github/alanderos91/MultiGraphEstimationModels.jl/coverage.svg?branch=master)](http://codecov.io/github/alanderos91/MultiGraphEstimationModels.jl?branch=master)
-<!--
 [![Documentation](https://img.shields.io/badge/docs-stable-blue.svg)](https://alanderos91.github.io/MultiGraphEstimationModels.jl/stable)
 [![Documentation](https://img.shields.io/badge/docs-master-blue.svg)](https://alanderos91.github.io/MultiGraphEstimationModels.jl/dev)
 -->
 
-# Examples
+Analyze networks with integer-valued edge weights as multigraphs.
 
-### Poisson Edges
+## Examples
+
+### Propensity-based Models
+
+Propensity-based multigraph models impose a distribution on edge weights/counts and model the expectations as a product of propensities, $E[Z_{i,j}] = p_{i} \cdot p_{j}$.
+The nonnegative propensities $p_{i}$ capture the likelihood of a node $i$ forming edges with other nodes and thus capture information about associations.
+
+#### Assuming Poisson distribution
 
 ```julia
 using MultiGraphEstimationModels, Statistics
-MG = MultiGraphEstimationModels
+mGEM = MultiGraphEstimationModels
 
-# Simulate a Poisson multigraph with 10 nodes.
-ground_truth = simulate_propensity_model(PoissonEdges(), 10, seed=1234)
-#
+# simulate under Poisson assumption
+model = mGEM.simulate_propensity_model(PoissonEdges(), 10; seed=1234)
 # MultiGraphModel{Int64,Float64}:
-#  - distribution: PoissonEdges
-#  - nodes: 10
-#  - covariates: 0
-#
+#   - distribution: PoissonEdges
+#   - nodes: 10
+#   - covariates: 0
 
-# See the simulated data.
-ground_truth.observed
+# see the count data/edge weights
+model.observed
 # 10×10 Matrix{Int64}:
 #   0  34  47  37  26  50  4  5  49  52
 #  34   0  43  49  32  53  5  3  47  62
@@ -44,17 +49,157 @@ ground_truth.observed
 #  49  47  63  64  48  57  6  5   0  76
 #  52  62  86  60  51  45  8  3  76   0
 
-# Fit a Poisson model to the data.
-fitted = MG.fit(PoissonEdges(), ground_truth.observed; maxiter=10^3, tolerance=1e-6);
+# fit a model under the Poisson assumption
+fitted = mGEM.fit_model(PoissonEdges(), model.observed; maxiter=10^3, tolerance=1e-6)
 # ┌ Info: Converged after 13 iterations.
-# │   loglikelihood = -251.21288265649747
-# └   initial = -1188.9424092513646
+# │   loglikelihood = -251.21288265649738
+# └   initial = -1188.942409251364
+# MultiGraphModel{Int64,Float64}:
+#   - distribution: PoissonEdges
+#   - nodes: 10
+#   - covariates: 0
 
-# MSE of propensity estimates with respect to ground truth.
-mean( (fitted.propensity .- ground_truth.propensity) .^ 2 )
+# largest error
+maximum(abs, model.propensity - fitted.propensity)
+# 0.7218133095737995
+
+# mean squared error
+mean(abs2, model.propensity - fitted.propensity)
 # 0.12911537825681738
+```
 
-# MSE of expected counts with respect to ground truth.
-mean( (fitted.expected .- ground_truth.expected) .^ 2 )
-# 8.650578286649598
+#### Assuming Negative Binomial distribution
+
+By default, we parameterize the negative binomial in the mean-scale formulation; that is, the option `NegBinEdges()` is equivalent to `NegBinEdges(MeanScale())`.
+
+This means that `r == model.parameters.scale` and `1/r == model.parameters.dispersion`.
+
+```julia
+using MultiGraphEstimationModels, Statistics
+mGEM = MultiGraphEstimationModels
+
+# simulate under Poisson assumption
+model = mGEM.simulate_propensity_model(NegBinEdges(), 100; seed=1234, dispersion=5.0)
+# MultiGraphModel{Int64,Float64}:
+#   - distribution: NegBinEdges{MeanScale}
+#   - nodes: 100
+#   - covariates: 0
+
+# fit a model under the Poisson assumption
+fitted = mGEM.fit_model(NegBinEdges(), model.observed; maxiter=10^3, tolerance=1e-6)
+# ┌ Info: Converged after 10 iterations.
+# │   loglikelihood = -316326.5902995308
+# └   initial = -423421.7307731593
+# ┌ Info: Converged after 179 iterations.
+# │   loglikelihood = -29084.79394826724
+# └   initial = -30001.971484287802
+# MultiGraphModel{Int64,Float64}:
+#   - distribution: NegBinEdges{MeanScale}
+#   - nodes: 100
+#   - covariates: 0
+
+# largest error
+maximum(abs, model.propensity - fitted.propensity)
+# 4.419471977156508
+
+# mean squared error
+mean(abs2, model.propensity - fitted.propensity)
+# 1.8753282099196253
+
+# nuisance parameter
+abs(model.parameters.scale - fitted.parameters.scale)
+# 0.0031294277817239535
+
+abs(model.parameters.dispersion - fitted.parameters.dispersion)
+# 0.07703038934089701
+```
+
+Alternatively, we have a separate algorithm for the mean-dispersion parameterization. Specify `NegBinEdges(MeanDispersion())` to use it.
+
+Under this parameterization, we have `1/a == model.parameters.scale` and `a == model.parameters.dispersion`.
+
+```julia
+using MultiGraphEstimationModels, Statistics
+mGEM = MultiGraphEstimationModels
+
+# simulate under Poisson assumption
+model = mGEM.simulate_propensity_model(NegBinEdges(MeanDispersion()), 100; seed=1234, dispersion=5.0)
+# MultiGraphModel{Int64,Float64}:
+#   - distribution: NegBinEdges{MeanDispersion}
+#   - nodes: 100
+#   - covariates: 0
+
+# fit a model under the Poisson assumption
+fitted = mGEM.fit_model(NegBinEdges(MeanDispersion()), model.observed; maxiter=10^3, tolerance=1e-6)
+# ┌ Info: Converged after 10 iterations.
+# │   loglikelihood = -316326.5902995308
+# └   initial = -423421.7307731593
+# ┌ Info: Converged after 261 iterations.
+# │   loglikelihood = -29084.191535320642
+# └   initial = -30001.971484287806
+# MultiGraphModel{Int64,Float64}:
+#   - distribution: NegBinEdges{MeanDispersion}
+#   - nodes: 100
+#   - covariates: 0
+
+# largest error
+maximum(abs, model.propensity - fitted.propensity)
+# 4.247552841237708
+
+# mean squared error
+mean(abs2, model.propensity - fitted.propensity)
+# 1.8184036476844943
+
+# nuisance parameter
+abs(model.parameters.scale - fitted.parameters.scale)
+# 0.00041730568138315105
+
+abs(model.parameters.dispersion - fitted.parameters.dispersion)
+# 0.010410919355601678
+```
+
+### Covariate-based Models
+
+We incorporate additional node-specific information by modeling propensities as log-linear models of their covariates
+$$
+p_{i} \sim \exp({x_{i}^{\top}\beta}),
+$$
+where $x_{i}$ denotes the covariates associated with node $i$ and $\beta$ is a coefficients vector.
+
+#### Assuming Poisson distribution
+
+```julia
+using MultiGraphEstimationModels, Statistics
+mGEM = MultiGraphEstimationModels
+
+# simulate under Poisson assumption
+model = mGEM.simulate_covariate_model(PoissonEdges(), 1000, 10; seed=1234)
+# MultiGraphModel{Int64,Float64}:
+#   - distribution: PoissonEdges
+#   - nodes: 1000
+#   - covariates: 10
+
+# fit a model under the Poisson assumption
+fitted = mGEM.fit_model(PoissonEdges(), model.observed, model.covariate; maxiter=10^3, tolerance=1e-6)
+# ┌ Info: Converged after 6 iterations.
+# │   loglikelihood = -1.3836596581445902e6
+# └   initial = -1.2406940032355124e7
+# MultiGraphModel{Int64,Float64}:
+#   - distribution: PoissonEdges
+#   - nodes: 1000
+#   - covariates: 10
+
+# largest error
+maximum(abs, model.propensity - fitted.propensity)
+# 0.07916104137893143
+
+maximum(abs, model.coefficient - fitted.coefficient)
+# 0.0008447705725385807
+
+# mean squared error
+mean(abs2, model.propensity - fitted.propensity)
+# 2.7222043272077668e-5
+
+mean(abs2, model.coefficient - fitted.coefficient)
+# 1.4275988042326197e-7
 ```

@@ -137,12 +137,11 @@ end
 function update_expectations!(model::MultiGraphModel, ::Nothing)
     p = model.propensity
     mu = model.expected
-    Threads.@threads for j in eachindex(p)
-        p_j = p[j]
-        v = view(mu, :, j)
+    T = eltype(mu)
+    for j in eachindex(p)
         for i in eachindex(p)
             if i == j continue end
-            v[i] = p[i] * p_j
+            mu[i,j] = p[i] * p[j]
         end
     end
 end
@@ -294,10 +293,9 @@ end
 
 # no covariates
 function __eval_loglikelihood_threaded__(model::MultiGraphModel{DIST}, buffer) where DIST
-    fill!(buffer, 0)
     p = model.propensity
-    Threads.@threads for j in eachindex(p)
-        t = Threads.threadid()
+    logl = 0.0
+    for j in eachindex(p)
         for i in eachindex(p)
             if i == j continue end
             x_ij = model.observed[i,j]
@@ -306,25 +304,24 @@ function __eval_loglikelihood_threaded__(model::MultiGraphModel{DIST}, buffer) w
             if isnan(logl_ij)
                 error("Detected NaN for edges between $i and $j. $x_ij and $mu_ij")
             end
-            buffer[t] += logl_ij
+            logl += logl_ij
         end
     end
-    return sum(buffer)
+    return logl
 end
 
 # with covariates
 function __eval_loglikelihood_and_derivs_threaded__(model::MultiGraphModel{DIST}, buffers) where DIST
-    logl = fill!(buffers.threads_buffers[1], 0)
-    d1f = buffers.threads_gradient
-    d2f = buffers.threads_hessian
-    tmp = buffers.threads_tmp
-    foreach(Base.Fix2(fill!, 0), d1f)
-    foreach(Base.Fix2(fill!, 0), d2f)
+    d1f = buffers.gradient
+    d2f = buffers.hessian
+    tmp = buffers.threads_tmp[1]
+    fill!(d1f, 0)
+    fill!(d2f, 0)
 
     p = model.propensity
     covariates = model.covariate
-    Threads.@threads for j in eachindex(p)
-        t = Threads.threadid()
+    logl = 0.0
+    for j in eachindex(p)
         zj = view(covariates, :, j)
         for i in eachindex(p)
             if i == j continue end
@@ -335,20 +332,14 @@ function __eval_loglikelihood_and_derivs_threaded__(model::MultiGraphModel{DIST}
             if isnan(logl_ij)
                 error("Detected NaN for edges between $i and $j. $x_ij and $mu_ij")
             end
-            logl[t] += logl_ij
-            partial_gradient!(DIST(), d1f[t], tmp[t], x_ij, mu_ij, zi, zj)
-            partial_hessian!(DIST(), d2f[t], tmp[t], x_ij, mu_ij, zi, zj)
+            logl += logl_ij
+            partial_gradient!(DIST(), d1f, tmp, x_ij, mu_ij, zi, zj)
+            partial_hessian!(DIST(), d2f, tmp, x_ij, mu_ij, zi, zj)
         end
     end
+    @. d2f = -d2f # neg Hessian for PD
 
-    T = eltype(p)
-    fill!(buffers.gradient, 0)
-    fill!(buffers.hessian, 0)
-    for k in eachindex(d1f)
-        axpy!(one(T), d1f[k], buffers.gradient)
-        axpy!(-one(T), d2f[k], buffers.hessian)
-    end
-    return sum(logl)
+    return logl
 end
 
 function partial_loglikelihood(::PoissonEdges, observed, expected, parameters)
@@ -556,7 +547,7 @@ function update!(::PoissonEdges, ::Nothing, model, buffers)
     sum_p = sum(p)
     old_p = copyto!(buffers.old_p, p)
 
-    Threads.@threads for i in eachindex(p)
+    for i in eachindex(p)
         sum_p_i = sum_p - old_p[i]
         p[i] = sqrt(old_p[i] * sum_x[i] / sum_p_i)
     end
@@ -575,37 +566,32 @@ function update!(::NegBinEdges{MeanScale}, ::Nothing, model, buffers)
 
     sum_x = buffers.sum_x
     old_p = copyto!(buffers.old_p, p)
-    storage = buffers.threads_buffers[1]
 
     # Update propensities.
-    Threads.@threads for j in eachindex(p)
-        t = Threads.threadid()
-        storage[t] = 0
+    for j in eachindex(p)
+        denominator = 0.0
         for i in eachindex(p)
             # Use symmetry x[i,j] = x[j,i].
             if i == j continue end
-            storage[t] += (x[i,j]+r) / (mu[i,j]+r) * old_p[i]
+            denominator += (x[i,j]+r) / (mu[i,j]+r) * old_p[i]
         end
-        p[j] = sum_x[j] / storage[t]
+        p[j] = sum_x[j] / denominator
     end
     update_expectations!(model)
 
     # Update scale parameter, r.
-    A = fill!(buffers.threads_buffers[1], 0)
-    B = fill!(buffers.threads_buffers[2], 0)
+    A = 0.0
+    B = 0.0
     digamma_r = digamma(r)
-    Threads.@threads for j in eachindex(p)
-        t = Threads.threadid()
-        u = view(x, :, j)
-        v = view(mu, :, j)
+    for j in eachindex(p)
         for i in eachindex(p)
             if i == j continue end
-            pi_ij = v[i] / (v[i]+r)
-            A[t] -= r*(digamma(u[i]+r) - digamma_r)
-            B[t] += log1p(-pi_ij) + (v[i] - u[i]) / (v[i] + r)
+            pi_ij = mu[i,j] / (mu[i,j]+r)
+            A -= r*(digamma(x[i,j]+r) - digamma_r)
+            B += log1p(-pi_ij) + (mu[i,j] - x[i,j]) / (mu[i,j] + r)
         end
     end
-    new_r = sum(A) / sum(B)
+    new_r = A / B
 
     update_expectations!(model)
     new_parameters = (scale=new_r, dispersion=inv(new_r))
@@ -624,35 +610,30 @@ function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
     storage = buffers.threads_buffers[1]
 
     # Update propensities.
-    Threads.@threads for j in eachindex(p)
-        t = Threads.threadid()
-        storage[t] = 0
+    for j in eachindex(p)
+        denominator = 0.0
         for i in eachindex(p)
             # Use symmetry x[i,j] = x[j,i].
             if i == j continue end
-            storage[t] += (a*x[i,j]+1) / (a*mu[i,j]+1) * old_p[i]
+            denominator += (a*x[i,j]+1) / (a*mu[i,j]+1) * old_p[i]
         end
-        p[j] = sum_x[j] / storage[t]
+        p[j] = sum_x[j] / denominator
     end
     update_expectations!(model)
 
     # Update dispersion parameter, a.
-    A = fill!(buffers.threads_buffers[1], 0)
-    B = fill!(buffers.threads_buffers[2], 0)
+    A = 0.0
+    B = 0.0
     digamma_inva = digamma(inv(a))
-    Threads.@threads for j in eachindex(p)
-        t = Threads.threadid()
-        u = view(x, :, j)
-        v = view(mu, :, j)
+    for j in eachindex(p)
         for i in eachindex(p)
             if i == j continue end
-            pi_ij = a*v[i] / (a*v[i]+1)
-            A[t] -= u[i]
-            B[t] -= inv(a)*(digamma(u[i]+inv(a)) - digamma_inva)
-            B[t] -= inv(a) * log1p(-pi_ij) + (u[i] + inv(a))*pi_ij
+            pi_ij = a*mu[i,j] / (a*mu[i,j]+1)
+            B -= inv(a) * (digamma(x[i,j] + inv(a)) - digamma_inva)
+            B -= inv(a) * log1p(-pi_ij) + (x[i,j] + inv(a)) * pi_ij
         end
     end
-    new_a = a * (sum(A) / sum(B))
+    new_a = a * (-sum(sum_x) / B)
 
     update_expectations!(model)
     new_parameters = (scale=inv(new_a), dispersion=new_a)

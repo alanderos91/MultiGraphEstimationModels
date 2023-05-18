@@ -130,7 +130,7 @@ function update_expectations!(model::MultiGraphModel, ::Any)
     Z = model.covariate
     b = model.coefficient
     mul!(p, transpose(Z), b)
-    @. p = exp(p)
+    @. p = min(625.0, exp(p))
     update_expectations!(model, nothing)
 end
 
@@ -474,7 +474,22 @@ function __mle_loop__(model, buffers, maxiter, tolerance)
     return model
 end
 
-init_model(::PoissonEdges, model) = model
+function init_model(::PoissonEdges, model)
+    if !(model.covariate isa Nothing)
+        m = length(model.propensity)
+        sum_x = sum(model.observed)
+        model.propensity .= sqrt( sum_x / (m * (m-1)) )
+
+        A = copy(model.covariate)       # LHS
+        b = A * log.(model.propensity)  # RHS
+        qrA = qr!(A')                   # in-place QR decomposition of A
+        R = LowerTriangular(qrA.R)      # R factor, wrapped as UpperTriangular for dispatch
+        y = R' \ b                      # Solve R'y = b
+        ldiv!(model.coefficient, R, y)  # Solve R*x = y
+    end
+    update_expectations!(model)
+    return model
+end
 
 function init_model(::NegBinEdges, model)
     init = MultiGraphModel(PoissonEdges(), model.observed, model.covariate)
@@ -486,18 +501,39 @@ function init_model(::NegBinEdges, model)
     return model
 end
 
+"""
+```
+fit_model(dist::AbstractEdgeDistribution, observed; kwargs...)
+```
+
+Fit a propensity-based model to the `observed` data assuming a `dist` edge distribution.
+"""
 function fit_model(dist::AbstractEdgeDistribution, observed; kwargs...)
     #
     model = MultiGraphModel(dist, observed)
     fit_model(model; kwargs...)
 end
 
+"""
+```
+fit_model(dist::AbstractEdgeDistribution, observed, covariates; kwargs...)
+```
+
+Fit a `covariates`-based model to the `observed` data assuming a `dist` edge distribution.
+"""
 function fit_model(dist::AbstractEdgeDistribution, observed, covariates; kwargs...)
     #
     model = MultiGraphModel(dist, observed, covariates)
     fit_model(model; kwargs...)
 end
 
+"""
+```
+fit_model(model::MultiGraphModel{DIST}; maxiter::Real=100, tolerance::Real=1e-6) where DIST
+```
+
+Estimate the parameters of the given `model` using MLE.
+"""
 function fit_model(model::MultiGraphModel{DIST}; maxiter::Real=100, tolerance::Real=1e-6) where DIST
     buffers = __allocate_buffers__(DIST(), model.propensity, model.covariate)
     model = init_model(DIST(), model)
@@ -625,7 +661,6 @@ end
 
 # Case: PoissonEdges, with covariates
 function update!(::PoissonEdges, ::AbstractMatrix, model, buffers)
-    p = model.propensity
     b = model.coefficient
     v = buffers.newton_direction
     d1f = buffers.gradient
@@ -633,11 +668,20 @@ function update!(::PoissonEdges, ::AbstractMatrix, model, buffers)
     T = eltype(v)
 
     # Update propensities with Newton's method
+    logl_old = __eval_loglikelihood_threaded__(model, buffers.threads_buffers[1])
     cholH = cholesky!(Symmetric(d2f, :L))
     ldiv!(v, cholH, d1f)
-    axpy!(one(T), v, b)
-
-    update_expectations!(model)
+    t = 1.0
+    for step in 0:8
+        axpy!(t, v, b)
+        update_expectations!(model)
+        logl_new =__eval_loglikelihood_threaded__(model, buffers.threads_buffers[1])
+        if logl_new > logl_old || step == 4
+            break
+        end
+        axpy!(-t, v, b)
+        t = t / 2
+    end
 
     return model
 end

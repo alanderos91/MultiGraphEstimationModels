@@ -645,7 +645,6 @@ function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
 
     sum_x = buffers.sum_x
     old_p = copyto!(buffers.old_p, p)
-    storage = buffers.threads_buffers[1]
 
     # Update propensities.
     @batch per=core for j in eachindex(p)
@@ -663,7 +662,7 @@ function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
     B_accumulator = buffers.accumulator[1]
     fill!(B_accumulator, 0)
     digamma_inva = digamma(inv(a))
-    for j in eachindex(p)
+    @batch per=core for j in eachindex(p)
         local_B = 0.0
         for i in eachindex(p)
             if i == j continue end
@@ -689,7 +688,7 @@ function update!(::PoissonEdges, ::AbstractMatrix, model, buffers)
     T = eltype(v)
 
     # Update propensities with Newton's method
-    logl_old = __eval_loglikelihood_threaded__(model)
+    logl_old = __eval_loglikelihood_threaded__(model, buffers)
     cholH = cholesky!(Symmetric(d2f, :L))
     ldiv!(v, cholH, d1f)
     t = 1.0
@@ -697,7 +696,7 @@ function update!(::PoissonEdges, ::AbstractMatrix, model, buffers)
     for step in 0:max_backtracking
         axpy!(t, v, b)
         update_expectations!(model)
-        logl_new =__eval_loglikelihood_threaded__(model)
+        logl_new =__eval_loglikelihood_threaded__(model, buffers)
         if logl_new > logl_old || step == max_backtracking
             break
         end

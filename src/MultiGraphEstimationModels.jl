@@ -416,7 +416,6 @@ function __allocate_buffers__(::PoissonEdges, p, ::Nothing)
     buffers = (;
         sum_x=zeros(Int, length(p)),
         old_p=similar(p),
-        threads_buffers=[zeros(Threads.nthreads()) for _ in 1:1]
     )
     return buffers
 end
@@ -426,7 +425,6 @@ function __allocate_buffers__(::NegBinEdges, p, ::Nothing)
     buffers = (;
         sum_x=zeros(Int, length(p)),
         old_p=similar(p),
-        threads_buffers=[zeros(Threads.nthreads()) for _ in 1:2],
     )
     return buffers
 end
@@ -679,11 +677,12 @@ function update!(::PoissonEdges, ::AbstractMatrix, model, buffers)
     cholH = cholesky!(Symmetric(d2f, :L))
     ldiv!(v, cholH, d1f)
     t = 1.0
-    for step in 0:8
+    max_backtracking = 8
+    for step in 0:max_backtracking
         axpy!(t, v, b)
         update_expectations!(model)
         logl_new =__eval_loglikelihood_threaded__(model)
-        if logl_new > logl_old || step == 4
+        if logl_new > logl_old || step == max_backtracking
             break
         end
         axpy!(-t, v, b)

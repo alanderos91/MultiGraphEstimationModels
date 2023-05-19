@@ -139,7 +139,7 @@ function update_expectations!(model::MultiGraphModel, ::Nothing)
     p = model.propensity
     mu = model.expected
     T = eltype(mu)
-    for j in eachindex(p)
+    @batch per=core for j in eachindex(p)
         for i in eachindex(p)
             if i == j continue end
             mu[i,j] = p[i] * p[j]
@@ -273,7 +273,8 @@ end
 
 # no covariates, no buffers
 function eval_loglikelihood(model::MultiGraphModel{DIST}, ::Nothing, ::Nothing) where DIST
-    __eval_loglikelihood_threaded__(model)
+    buffers = __allocate_buffers__(DIST(), model.propensity, nothing)
+    __eval_loglikelihood_threaded__(model, buffers)
 end
 
 # with covariates, allocate buffers
@@ -284,7 +285,7 @@ end
 
 # no covariates, with buffers
 function eval_loglikelihood(model::MultiGraphModel{DIST}, ::Nothing, buffers) where DIST
-    __eval_loglikelihood_threaded__(model)
+    __eval_loglikelihood_threaded__(model, buffers)
 end
 
 # with covariates, with buffers
@@ -311,9 +312,12 @@ function __eval_loglikelihood_unthreaded__(model::MultiGraphModel{DIST}) where D
     return logl
 end
 
-function __eval_loglikelihood_threaded__(model::MultiGraphModel{DIST}) where DIST
+function __eval_loglikelihood_threaded__(model::MultiGraphModel{DIST}, buffers) where DIST
     p = model.propensity
-    @batch per=core threadlocal=0.0::Float64 for j in eachindex(p)
+    accumulator = buffers.accumulator[1]
+    fill!(accumulator, 0)
+    @batch per=core for j in eachindex(p)
+        local_logl = 0.0
         for i in eachindex(p)
             if i == j continue end
             x_ij = model.observed[i,j]
@@ -322,10 +326,11 @@ function __eval_loglikelihood_threaded__(model::MultiGraphModel{DIST}) where DIS
             if isnan(logl_ij)
                 error("Detected NaN for edges between $i and $j. $x_ij and $mu_ij")
             end
-            threadlocal += logl_ij
+            local_logl += logl_ij
         end
+        accumulator[Threads.threadid()] += local_logl
     end
-    return sum(threadlocal)
+    return sum(accumulator)
 end
 
 # with covariates
@@ -336,7 +341,7 @@ function __eval_loglikelihood_and_derivs_unthreaded__(model::MultiGraphModel{DIS
 end
 
 function __eval_loglikelihood_and_derivs_threaded__(model::MultiGraphModel{DIST}, buffers) where DIST
-    logl = __eval_loglikelihood_threaded__(model)
+    logl = __eval_loglikelihood_threaded__(model, buffers)
     __eval_derivs!__(model, buffers)
     return logl
 end
@@ -416,6 +421,7 @@ function __allocate_buffers__(::PoissonEdges, p, ::Nothing)
     buffers = (;
         sum_x=zeros(Int, length(p)),
         old_p=similar(p),
+        accumulator=[zeros(Threads.nthreads()) for _ in 1:1],
     )
     return buffers
 end
@@ -425,6 +431,7 @@ function __allocate_buffers__(::NegBinEdges, p, ::Nothing)
     buffers = (;
         sum_x=zeros(Int, length(p)),
         old_p=similar(p),
+        accumulator=[zeros(Threads.nthreads()) for _ in 1:2],
     )
     return buffers
 end
@@ -437,6 +444,7 @@ function __allocate_buffers__(::PoissonEdges, p, Z::AbstractMatrix)
     buffers = (;
         sum_x=zeros(Int, nnodes),
         old_p=similar(p),
+        accumulator=[zeros(Threads.nthreads()) for _ in 1:1],
         newton_direction=zeros(ncovars),
         gradient=zeros(ncovars),
         hessian=zeros(ncovars, ncovars),
@@ -571,7 +579,7 @@ function update!(::PoissonEdges, ::Nothing, model, buffers)
     sum_p = sum(p)
     old_p = copyto!(buffers.old_p, p)
 
-    for i in eachindex(p)
+    @batch per=core for i in eachindex(p)
         sum_p_i = sum_p - old_p[i]
         p[i] = sqrt(old_p[i] * sum_x[i] / sum_p_i)
     end
@@ -592,7 +600,7 @@ function update!(::NegBinEdges{MeanScale}, ::Nothing, model, buffers)
     old_p = copyto!(buffers.old_p, p)
 
     # Update propensities.
-    for j in eachindex(p)
+    @batch per=core for j in eachindex(p)
         denominator = 0.0
         for i in eachindex(p)
             # Use symmetry x[i,j] = x[j,i].
@@ -604,18 +612,24 @@ function update!(::NegBinEdges{MeanScale}, ::Nothing, model, buffers)
     update_expectations!(model)
 
     # Update scale parameter, r.
-    A = 0.0
-    B = 0.0
+    A_accumulator = buffers.accumulator[1]
+    B_accumulator = buffers.accumulator[2]
+    fill!(A_accumulator, 0)
+    fill!(B_accumulator, 0)
     digamma_r = digamma(r)
-    for j in eachindex(p)
+    @batch per=core for j in eachindex(p)
+        local_A = 0.0
+        local_B = 0.0
         for i in eachindex(p)
             if i == j continue end
             pi_ij = mu[i,j] / (mu[i,j]+r)
-            A -= r*(digamma(x[i,j]+r) - digamma_r)
-            B += log1p(-pi_ij) + (mu[i,j] - x[i,j]) / (mu[i,j] + r)
+            local_A -= r*(digamma(x[i,j]+r) - digamma_r)
+            local_B += log1p(-pi_ij) + (mu[i,j] - x[i,j]) / (mu[i,j] + r)
         end
+        A_accumulator[Threads.threadid()] += local_A
+        B_accumulator[Threads.threadid()] += local_B
     end
-    new_r = A / B
+    new_r = sum(A_accumulator) / sum(B_accumulator)
 
     update_expectations!(model)
     new_parameters = (scale=new_r, dispersion=inv(new_r))
@@ -634,7 +648,7 @@ function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
     storage = buffers.threads_buffers[1]
 
     # Update propensities.
-    for j in eachindex(p)
+    @batch per=core for j in eachindex(p)
         denominator = 0.0
         for i in eachindex(p)
             # Use symmetry x[i,j] = x[j,i].
@@ -646,18 +660,20 @@ function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
     update_expectations!(model)
 
     # Update dispersion parameter, a.
-    A = 0.0
-    B = 0.0
+    B_accumulator = buffers.accumulator[1]
+    fill!(B_accumulator, 0)
     digamma_inva = digamma(inv(a))
     for j in eachindex(p)
+        local_B = 0.0
         for i in eachindex(p)
             if i == j continue end
             pi_ij = a*mu[i,j] / (a*mu[i,j]+1)
-            B -= inv(a) * (digamma(x[i,j] + inv(a)) - digamma_inva)
-            B -= inv(a) * log1p(-pi_ij) + (x[i,j] + inv(a)) * pi_ij
+            local_B -= inv(a) * (digamma(x[i,j] + inv(a)) - digamma_inva)
+            local_B -= inv(a) * log1p(-pi_ij) + (x[i,j] + inv(a)) * pi_ij
         end
+        B_accumulator[Threads.threadid()] += local_B
     end
-    new_a = a * (-sum(sum_x) / B)
+    new_a = a * (-sum(sum_x) / sum(B_accumulator))
 
     update_expectations!(model)
     new_parameters = (scale=inv(new_a), dispersion=new_a)

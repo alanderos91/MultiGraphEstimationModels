@@ -89,10 +89,10 @@ model = mGEM.simulate_propensity_model(NegBinEdges(), 100; seed=1234, dispersion
 fitted = mGEM.fit_model(NegBinEdges(), model.observed; maxiter=10^3, tolerance=1e-6)
 # ┌ Info: Converged after 10 iterations.
 # │   loglikelihood = -316326.5902995308
-# └   initial = -423421.7307731593
+# └   initial = -423421.73077315575
 # ┌ Info: Converged after 179 iterations.
-# │   loglikelihood = -29084.79394826724
-# └   initial = -30001.971484287802
+# │   loglikelihood = -29084.793948267252
+# └   initial = -30001.971484287835
 # MultiGraphModel{Int64,Float64}:
 #   - distribution: NegBinEdges{MeanScale}
 #   - nodes: 100
@@ -100,15 +100,15 @@ fitted = mGEM.fit_model(NegBinEdges(), model.observed; maxiter=10^3, tolerance=1
 
 # largest error
 maximum(abs, model.propensity - fitted.propensity)
-# 4.419471977156508
+# 4.419471977156574
 
 # mean squared error
 mean(abs2, model.propensity - fitted.propensity)
-# 1.8753282099196253
+# 1.8753282099196358
 
 # nuisance parameter
 abs(model.parameters.scale - fitted.parameters.scale)
-# 0.0031294277817239535
+# 0.003129427781723898
 
 abs(model.parameters.dispersion - fitted.parameters.dispersion)
 # 0.07703038934089701
@@ -144,18 +144,18 @@ fitted = mGEM.fit_model(NegBinEdges(MeanDispersion()), model.observed; maxiter=1
 
 # largest error
 maximum(abs, model.propensity - fitted.propensity)
-# 4.247552841237708
+# 4.247552841237734
 
 # mean squared error
 mean(abs2, model.propensity - fitted.propensity)
-# 1.8184036476844943
+# 1.8184036476844974
 
 # nuisance parameter
 abs(model.parameters.scale - fitted.parameters.scale)
-# 0.00041730568138315105
+# 0.0004173056813826237
 
 abs(model.parameters.dispersion - fitted.parameters.dispersion)
-# 0.010410919355601678
+# 0.010410919355588355
 ```
 
 ### Covariate-based Models

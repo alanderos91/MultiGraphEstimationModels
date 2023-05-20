@@ -494,7 +494,15 @@ function __mle_loop__(model, buffers, maxiter, tolerance)
         @info "Failed to converge after $(iter) iterations." loglikelihood=old_logl initial=init_logl
     end
 
-    return model
+    result = (
+        logl_init=init_logl,
+        logl_final=old_logl,
+        fitted=model,
+        iterations=iter,
+        converged=converged,
+    )
+
+    return result
 end
 
 function init_model(::PoissonEdges, model)

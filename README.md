@@ -50,10 +50,25 @@ model.observed
 #  52  62  86  60  51  45  8  3  76   0
 
 # fit a model under the Poisson assumption
-fitted = mGEM.fit_model(PoissonEdges(), model.observed; maxiter=10^3, tolerance=1e-6)
+result = mGEM.fit_model(PoissonEdges(), model.observed; maxiter=10^3, tolerance=1e-6);
 # ┌ Info: Converged after 13 iterations.
 # │   loglikelihood = -251.21288265649738
 # └   initial = -1188.942409251364
+
+# inspect results
+result.logl_init
+# -1188.942409251364
+
+result.logl_final
+# result.logl_final
+
+result.iterations
+# 13
+
+result.converged
+# true
+
+fitted = result.fitted
 # MultiGraphModel{Int64,Float64}:
 #   - distribution: PoissonEdges
 #   - nodes: 10
@@ -86,13 +101,14 @@ model = mGEM.simulate_propensity_model(NegBinEdges(), 100; seed=1234, dispersion
 #   - covariates: 0
 
 # fit a model under the Poisson assumption
-fitted = mGEM.fit_model(NegBinEdges(), model.observed; maxiter=10^3, tolerance=1e-6)
+result = mGEM.fit_model(NegBinEdges(), model.observed; maxiter=10^3, tolerance=1e-6);
 # ┌ Info: Converged after 10 iterations.
 # │   loglikelihood = -316326.5902995308
 # └   initial = -423421.73077315575
 # ┌ Info: Converged after 179 iterations.
 # │   loglikelihood = -29084.793948267252
 # └   initial = -30001.971484287835
+fitted = result.fitted
 # MultiGraphModel{Int64,Float64}:
 #   - distribution: NegBinEdges{MeanScale}
 #   - nodes: 100
@@ -130,13 +146,14 @@ model = mGEM.simulate_propensity_model(NegBinEdges(MeanDispersion()), 100; seed=
 #   - covariates: 0
 
 # fit a model under the Poisson assumption
-fitted = mGEM.fit_model(NegBinEdges(MeanDispersion()), model.observed; maxiter=10^3, tolerance=1e-6)
+result = mGEM.fit_model(NegBinEdges(MeanDispersion()), model.observed; maxiter=10^3, tolerance=1e-6);
 # ┌ Info: Converged after 10 iterations.
 # │   loglikelihood = -316326.5902995308
 # └   initial = -423421.7307731593
 # ┌ Info: Converged after 261 iterations.
 # │   loglikelihood = -29084.191535320642
 # └   initial = -30001.971484287806
+fitted = result.fitted
 # MultiGraphModel{Int64,Float64}:
 #   - distribution: NegBinEdges{MeanDispersion}
 #   - nodes: 100
@@ -180,10 +197,11 @@ model = mGEM.simulate_covariate_model(PoissonEdges(), 1000, 10; seed=1234)
 #   - covariates: 10
 
 # fit a model under the Poisson assumption
-fitted = mGEM.fit_model(PoissonEdges(), model.observed, model.covariate; maxiter=10^3, tolerance=1e-6)
+result = mGEM.fit_model(PoissonEdges(), model.observed, model.covariate; maxiter=10^3, tolerance=1e-6);
 # ┌ Info: Converged after 6 iterations.
 # │   loglikelihood = -1.3836596581445902e6
 # └   initial = -1.2406940032355124e7
+fitted = result.fitted
 # MultiGraphModel{Int64,Float64}:
 #   - distribution: PoissonEdges
 #   - nodes: 1000

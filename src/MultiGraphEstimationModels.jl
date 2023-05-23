@@ -199,7 +199,7 @@ function simulate_propensity_model(dist::NegBinEdges, nnodes::Int; dispersion::R
     # set scale parameter, r = 1/dispersion
     r = 1 / dispersion
 
-    # simulate Poisson expectations and data
+    # simulate Negative Binomial expectations and data
     expected = zeros(Float64, nnodes, nnodes)
     observed = zeros(Int, nnodes, nnodes)
     for j in 1:nnodes, i in j+1:nnodes
@@ -248,6 +248,49 @@ function simulate_covariate_model(::PoissonEdges, nnodes::Int, ncovar::Int; seed
     end
 
     example = MultiGraphModel(PoissonEdges(), observed, covariate)
+    copyto!(example.propensity, propensity)
+    copyto!(example.coefficient, coefficient)
+    copyto!(example.expected, expected)
+
+    return example
+end
+
+function simulate_covariate_model(dist::NegBinEdges, nnodes::Int, ncovar::Int; dispersion::Real=1.0, seed::Integer=1903)
+    # initialize RNG
+    rng = StableRNG(seed)
+
+    # simulate p covariates for each of the m nodes; iid N(0,1)
+    design_matrix = randn(rng, ncovar, nnodes)
+
+    # center and scale
+    μ = mean(design_matrix, dims=2)
+    σ = std(design_matrix, dims=2)
+    covariate = (design_matrix .- μ) ./ σ
+
+    # draw effect sizes uniformly from [-3, 3] 
+    coefficient = zeros(ncovar)
+    coefficient[1] = 3*(2*rand(rng)-1)
+    coefficient[2:ncovar] = 1e-1*randn(rng, ncovar-1)
+
+    # simulate propensities
+    propensity = @views [exp(dot(covariate[:,i], coefficient)) for i in 1:nnodes]
+
+    # set scale parameter, r = 1/dispersion
+    r = 1 / dispersion
+
+    # simulate Negative Binomial expectations and data
+    expected = zeros(Float64, nnodes, nnodes)
+    observed = zeros(Int, nnodes, nnodes)
+    for j in 1:nnodes, i in j+1:nnodes
+        mu_ij = propensity[i] * propensity[j]
+        pi_ij = mu_ij / (mu_ij + r)
+        D = NegativeBinomial(r, 1-pi_ij)
+        observed[i,j] = observed[j,i] = rand(rng, D)
+        expected[i,j] = expected[j,i] = mu_ij
+    end
+
+    params = (scale=r, dispersion=dispersion)
+    example = MultiGraphModel(dist, observed, covariate, params)
     copyto!(example.propensity, propensity)
     copyto!(example.coefficient, coefficient)
     copyto!(example.expected, expected)
@@ -336,17 +379,17 @@ end
 # with covariates
 function __eval_loglikelihood_and_derivs_unthreaded__(model::MultiGraphModel{DIST}, buffers) where DIST
     logl = __eval_loglikelihood_unthreaded__(model)
-    __eval_derivs!__(model, buffers)
+    __eval_derivs!__(DIST(), model, buffers)
     return logl
 end
 
 function __eval_loglikelihood_and_derivs_threaded__(model::MultiGraphModel{DIST}, buffers) where DIST
     logl = __eval_loglikelihood_threaded__(model, buffers)
-    __eval_derivs!__(model, buffers)
+    __eval_derivs!__(DIST(), model, buffers)
     return logl
 end
 
-function __eval_derivs!__(model, buffers)
+function __eval_derivs!__(::PoissonEdges, model, buffers)
     # Assumes Poisson
     d1f = buffers.gradient
     d2f = buffers.hessian
@@ -365,7 +408,36 @@ function __eval_derivs!__(model, buffers)
 
     # Hessian
     sum!(w, M)
-    @. tmp1 = $Diagonal(w) - M
+    @. tmp1 = $Diagonal(w) + M
+    mul!(transpose(tmp2), tmp1, transpose(X))
+    mul!(d2f, X, transpose(tmp2))
+    @. d2f = 2*d2f
+
+    return nothing
+end
+
+function __eval_derivs!__(::NegBinEdges{MeanScale}, model, buffers)
+    # Assumes Poisson
+    d1f = buffers.gradient
+    d2f = buffers.hessian
+    tmp1 = buffers.m_by_m
+    tmp2 = buffers.c_by_m
+    w = buffers.diag
+    X = model.covariate
+    M = model.expected
+    Z = model.observed
+    r = model.parameters.scale
+
+    # gradient
+    @. tmp1 = Z - (Z+r)/(M+r)*M # element-wise operations
+    mul!(tmp2, X, tmp1)
+    sum!(d1f, tmp2)
+    @. d1f = 2*d1f
+
+    # Hessian
+    @. tmp1 = (1 - M/(M+r))*M # element-wise operations
+    sum!(w, tmp1)
+    @. tmp1 = $Diagonal(w) + tmp1
     mul!(transpose(tmp2), tmp1, transpose(X))
     mul!(d2f, X, transpose(tmp2))
     @. d2f = 2*d2f
@@ -455,6 +527,24 @@ function __allocate_buffers__(::PoissonEdges, p, Z::AbstractMatrix)
     return buffers
 end
 
+# Case: NegBinEdges, with covariates
+function __allocate_buffers__(::NegBinEdges, p, Z::AbstractMatrix)
+    nnodes = length(p)
+    ncovars = size(Z, 1)
+    buffers = (;
+        sum_x=zeros(Int, length(p)),
+        old_p=similar(p),
+        accumulator=[zeros(Threads.nthreads()) for _ in 1:2],
+        newton_direction=zeros(ncovars),
+        gradient=zeros(ncovars),
+        hessian=zeros(ncovars, ncovars),
+        m_by_m=zeros(nnodes, nnodes),
+        c_by_m=zeros(ncovars, nnodes),
+        diag=zeros(nnodes),
+    )
+    return buffers
+end
+
 function __mle_loop__(model, buffers, maxiter, tolerance)
     # initialize constants
     sum!(buffers.sum_x, model.observed)
@@ -523,11 +613,24 @@ function init_model(::PoissonEdges, model)
 end
 
 function init_model(::NegBinEdges, model)
-    init = MultiGraphModel(PoissonEdges(), model.observed, model.covariate)
-    copyto!(init.propensity, model.propensity)
-    update_expectations!(init)
-    init = fit_model(init)
-    copyto!(model.propensity, init.propensity)
+    if !(model.covariate isa Nothing)
+        m = length(model.propensity)
+        sum_x = sum(model.observed)
+        model.propensity .= sqrt( sum_x / (m * (m-1)) )
+
+        A = copy(model.covariate)       # LHS
+        b = A * log.(model.propensity)  # RHS
+        qrA = qr!(A')                   # in-place QR decomposition of A
+        R = LowerTriangular(qrA.R)      # R factor, wrapped as UpperTriangular for dispatch
+        y = R' \ b                      # Solve R'y = b
+        ldiv!(model.coefficient, R, y)  # Solve R*x = y
+    else
+        init = MultiGraphModel(PoissonEdges(), model.observed, model.covariate)
+        copyto!(init.propensity, model.propensity)
+        update_expectations!(init)
+        init = fit_model(init)
+        copyto!(model.propensity, init.propensity)
+    end
     update_expectations!(model)
     return model
 end
@@ -687,7 +790,7 @@ function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
     return remake_model!(model, new_parameters)
 end
 
-# Case: PoissonEdges, with covariates
+# Case: any edge distribution, with covariates
 function update!(::PoissonEdges, ::AbstractMatrix, model, buffers)
     b = model.coefficient
     v = buffers.newton_direction
@@ -713,6 +816,61 @@ function update!(::PoissonEdges, ::AbstractMatrix, model, buffers)
     end
 
     return model
+end
+
+function update!(::NegBinEdges, ::AbstractMatrix, model, buffers)
+    b = model.coefficient
+    v = buffers.newton_direction
+    d1f = buffers.gradient
+    d2f = buffers.hessian
+    T = eltype(v)
+
+    # Update propensities with Newton's method
+    logl_old = __eval_loglikelihood_threaded__(model, buffers)
+    cholH = cholesky!(Symmetric(d2f, :L))
+    ldiv!(v, cholH, d1f)
+    t = 1.0
+    max_backtracking = 8
+    for step in 0:max_backtracking
+        axpy!(t, v, b)
+        update_expectations!(model)
+        logl_new =__eval_loglikelihood_threaded__(model, buffers)
+        if logl_new > logl_old || step == max_backtracking
+            break
+        end
+        axpy!(-t, v, b)
+        t = t / 2
+    end
+
+    # Update scale parameter, r.
+    p = model.propensity
+    r = model.parameters.scale
+    mu = model.expected
+    x = model.observed
+    
+    A_accumulator = buffers.accumulator[1]
+    B_accumulator = buffers.accumulator[2]
+    fill!(A_accumulator, 0)
+    fill!(B_accumulator, 0)
+    digamma_r = digamma(r)
+    @batch per=core for j in eachindex(p)
+        local_A = 0.0
+        local_B = 0.0
+        for i in eachindex(p)
+            if i == j continue end
+            pi_ij = mu[i,j] / (mu[i,j]+r)
+            local_A -= r*(digamma(x[i,j]+r) - digamma_r)
+            local_B += log1p(-pi_ij) + (mu[i,j] - x[i,j]) / (mu[i,j] + r)
+        end
+        A_accumulator[Threads.threadid()] += local_A
+        B_accumulator[Threads.threadid()] += local_B
+    end
+    new_r = sum(A_accumulator) / sum(B_accumulator)
+
+    update_expectations!(model)
+    new_parameters = (scale=new_r, dispersion=inv(new_r))
+
+    return remake_model!(model, new_parameters)
 end
 
 end # module

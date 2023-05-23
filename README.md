@@ -221,3 +221,42 @@ mean(abs2, model.propensity - fitted.propensity)
 mean(abs2, model.coefficient - fitted.coefficient)
 # 1.4275988042326197e-7
 ```
+
+#### Assuming Negative Binomial distribution
+
+```julia
+using MultiGraphEstimationModels, Statistics
+mGEM = MultiGraphEstimationModels
+
+# simulate under Poisson assumption
+model = mGEM.simulate_covariate_model(NegBinEdges(), 1000, 10; dispersion=2.0, seed=1234)
+# MultiGraphModel{Int64,Float64}:
+#   - distribution: NegBinEdges{MeanScale}
+#   - nodes: 1000
+#   - covariates: 10
+
+# fit a model under the Poisson assumption
+result = mGEM.fit_model(NegBinEdges(), model.observed, model.covariate; maxiter=10^3, tolerance=1e-6);
+# ┌ Info: Converged after 20 iterations.
+# │   loglikelihood = -1.5926005004651072e6
+# └   initial = -2.309052251536611e6
+fitted = result.fitted
+# MultiGraphModel{Int64,Float64}:
+#   - distribution: NegBinEdges{MeanScale}
+#   - nodes: 1000
+#   - covariates: 10
+
+# largest error
+maximum(abs, model.propensity - fitted.propensity)
+# 0.32012244582232796
+
+maximum(abs, model.coefficient - fitted.coefficient)
+# 0.0029198473449780493
+
+# mean squared error
+mean(abs2, model.propensity - fitted.propensity)
+# 0.0005649879300132473
+
+mean(abs2, model.coefficient - fitted.coefficient)
+# 2.508108767946127e-6
+```

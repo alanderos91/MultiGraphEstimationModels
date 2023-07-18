@@ -628,8 +628,8 @@ function init_model(::NegBinEdges, model)
         init = MultiGraphModel(PoissonEdges(), model.observed, model.covariate)
         copyto!(init.propensity, model.propensity)
         update_expectations!(init)
-        init = fit_model(init)
-        copyto!(model.propensity, init.propensity)
+        result = fit_model(init)
+        copyto!(model.propensity, result.fitted.propensity)
     end
     update_expectations!(model)
     return model

@@ -93,14 +93,14 @@ This means that `r == model.parameters.scale` and `1/r == model.parameters.dispe
 using MultiGraphEstimationModels, Statistics
 mGEM = MultiGraphEstimationModels
 
-# simulate under Poisson assumption
+# simulate under negative binomial assumption
 model = mGEM.simulate_propensity_model(NegBinEdges(), 100; seed=1234, dispersion=5.0)
 # MultiGraphModel{Int64,Float64}:
 #   - distribution: NegBinEdges{MeanScale}
 #   - nodes: 100
 #   - covariates: 0
 
-# fit a model under the Poisson assumption
+# fit a model under the negative binomial assumption
 result = mGEM.fit_model(NegBinEdges(), model.observed; maxiter=10^3, tolerance=1e-6);
 # ┌ Info: Converged after 10 iterations.
 # │   loglikelihood = -316326.5902995308
@@ -138,14 +138,14 @@ Under this parameterization, we have `1/a == model.parameters.scale` and `a == m
 using MultiGraphEstimationModels, Statistics
 mGEM = MultiGraphEstimationModels
 
-# simulate under Poisson assumption
+# simulate under negative binomial assumption
 model = mGEM.simulate_propensity_model(NegBinEdges(MeanDispersion()), 100; seed=1234, dispersion=5.0)
 # MultiGraphModel{Int64,Float64}:
 #   - distribution: NegBinEdges{MeanDispersion}
 #   - nodes: 100
 #   - covariates: 0
 
-# fit a model under the Poisson assumption
+# fit a model under the negative binomial assumption
 result = mGEM.fit_model(NegBinEdges(MeanDispersion()), model.observed; maxiter=10^3, tolerance=1e-6);
 # ┌ Info: Converged after 10 iterations.
 # │   loglikelihood = -316326.5902995308
@@ -228,14 +228,14 @@ mean(abs2, model.coefficient - fitted.coefficient)
 using MultiGraphEstimationModels, Statistics
 mGEM = MultiGraphEstimationModels
 
-# simulate under Poisson assumption
+# simulate under negative binomial assumption
 model = mGEM.simulate_covariate_model(NegBinEdges(), 1000, 10; dispersion=2.0, seed=1234)
 # MultiGraphModel{Int64,Float64}:
 #   - distribution: NegBinEdges{MeanScale}
 #   - nodes: 1000
 #   - covariates: 10
 
-# fit a model under the Poisson assumption
+# fit a model under the negative binomial assumption
 result = mGEM.fit_model(NegBinEdges(), model.observed, model.covariate; maxiter=10^3, tolerance=1e-6);
 # ┌ Info: Converged after 20 iterations.
 # │   loglikelihood = -1.5926005004651072e6

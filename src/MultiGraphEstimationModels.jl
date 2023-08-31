@@ -417,7 +417,7 @@ function __eval_derivs!__(::PoissonEdges, model, buffers)
 end
 
 function __eval_derivs!__(::NegBinEdges{MeanScale}, model, buffers)
-    # Assumes Poisson
+    # Assumes mean-scale
     d1f = buffers.gradient
     d2f = buffers.hessian
     tmp1 = buffers.m_by_m
@@ -436,6 +436,35 @@ function __eval_derivs!__(::NegBinEdges{MeanScale}, model, buffers)
 
     # Hessian
     @. tmp1 = (1 - M/(M+r))*M # element-wise operations
+    sum!(w, tmp1)
+    @. tmp1 = $Diagonal(w) + tmp1
+    mul!(transpose(tmp2), tmp1, transpose(X))
+    mul!(d2f, X, transpose(tmp2))
+    @. d2f = 2*d2f
+
+    return nothing
+end
+
+function __eval_derivs!__(::NegBinEdges{MeanDispersion}, model, buffers)
+    # Assumes mean-dispersion
+    d1f = buffers.gradient
+    d2f = buffers.hessian
+    tmp1 = buffers.m_by_m
+    tmp2 = buffers.c_by_m
+    w = buffers.diag
+    X = model.covariate
+    M = model.expected
+    Z = model.observed
+    a = model.parameters.dispersion
+
+    # gradient
+    @. tmp1 = Z - (a*Z+1)/(a*M+1)*M # element-wise operations
+    mul!(tmp2, X, tmp1)
+    sum!(d1f, tmp2)
+    @. d1f = 2*d1f
+
+    # Hessian
+    @. tmp1 = (1 - a*M/(a*M+1))*M # element-wise operations
     sum!(w, tmp1)
     @. tmp1 = $Diagonal(w) + tmp1
     mul!(transpose(tmp2), tmp1, transpose(X))
@@ -680,6 +709,82 @@ export fit_model
 #   ALGORITHM MAPS
 #
 
+function __mm_new_r_param__(model, buffers)
+    p = model.propensity
+    r = model.parameters.scale
+    mu = model.expected
+    x = model.observed
+
+    A_accumulator = buffers.accumulator[1]
+    B_accumulator = buffers.accumulator[2]
+    fill!(A_accumulator, 0)
+    fill!(B_accumulator, 0)
+    digamma_r = digamma(r)
+
+    @batch per=core for j in eachindex(p)
+        local_A = 0.0
+        local_B = 0.0
+        for i in eachindex(p)
+            if i == j continue end
+            pi_ij = mu[i,j] / (mu[i,j]+r)
+            local_A -= r*(digamma(x[i,j]+r) - digamma_r)
+            local_B += log1p(-pi_ij) + (mu[i,j] - x[i,j]) / (mu[i,j] + r)
+        end
+        A_accumulator[Threads.threadid()] += local_A
+        B_accumulator[Threads.threadid()] += local_B
+    end
+
+    return sum(A_accumulator) / sum(B_accumulator)
+end
+
+function __mm_new_a_param__(model, buffers)
+    p = model.propensity
+    x = model.observed
+    a = model.parameters.dispersion
+    mu = model.expected
+
+    sum_x = buffers.sum_x
+    B_accumulator = buffers.accumulator[1]
+    fill!(B_accumulator, 0)
+    digamma_inva = digamma(inv(a))
+
+    @batch per=core for j in eachindex(p)
+        local_B = 0.0
+        for i in eachindex(p)
+            if i == j continue end
+            pi_ij = a*mu[i,j] / (a*mu[i,j]+1)
+            local_B -= inv(a) * (digamma(x[i,j] + inv(a)) - digamma_inva)
+            local_B -= inv(a) * log1p(-pi_ij) + (x[i,j] + inv(a)) * pi_ij
+        end
+        B_accumulator[Threads.threadid()] += local_B
+    end
+
+    return a * (-sum(sum_x) / sum(B_accumulator))
+end
+
+function __newton_new_coefficients__(model, buffers)
+    b = model.coefficient
+    v = buffers.newton_direction
+    d1f = buffers.gradient
+    d2f = buffers.hessian
+
+    logl_old = __eval_loglikelihood_threaded__(model, buffers)
+    cholH = cholesky!(Symmetric(d2f, :L))
+    ldiv!(v, cholH, d1f)
+    t = 1.0
+    max_backtracking = 8
+    for step in 0:max_backtracking
+        axpy!(t, v, b)
+        update_expectations!(model)
+        logl_new =__eval_loglikelihood_threaded__(model, buffers)
+        if logl_new > logl_old || step == max_backtracking
+            break
+        end
+        axpy!(-t, v, b)
+        t = t / 2
+    end
+end
+
 update!(model::MultiGraphModel{DIST}, buffers) where DIST = update!(DIST(), model.covariate, model, buffers)
 
 # Case: PoissonEdges, no covariates
@@ -723,24 +828,7 @@ function update!(::NegBinEdges{MeanScale}, ::Nothing, model, buffers)
     update_expectations!(model)
 
     # Update scale parameter, r.
-    A_accumulator = buffers.accumulator[1]
-    B_accumulator = buffers.accumulator[2]
-    fill!(A_accumulator, 0)
-    fill!(B_accumulator, 0)
-    digamma_r = digamma(r)
-    @batch per=core for j in eachindex(p)
-        local_A = 0.0
-        local_B = 0.0
-        for i in eachindex(p)
-            if i == j continue end
-            pi_ij = mu[i,j] / (mu[i,j]+r)
-            local_A -= r*(digamma(x[i,j]+r) - digamma_r)
-            local_B += log1p(-pi_ij) + (mu[i,j] - x[i,j]) / (mu[i,j] + r)
-        end
-        A_accumulator[Threads.threadid()] += local_A
-        B_accumulator[Threads.threadid()] += local_B
-    end
-    new_r = sum(A_accumulator) / sum(B_accumulator)
+    new_r = __mm_new_r_param__(model, buffers)
 
     update_expectations!(model)
     new_parameters = (scale=new_r, dispersion=inv(new_r))
@@ -770,105 +858,45 @@ function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
     update_expectations!(model)
 
     # Update dispersion parameter, a.
-    B_accumulator = buffers.accumulator[1]
-    fill!(B_accumulator, 0)
-    digamma_inva = digamma(inv(a))
-    @batch per=core for j in eachindex(p)
-        local_B = 0.0
-        for i in eachindex(p)
-            if i == j continue end
-            pi_ij = a*mu[i,j] / (a*mu[i,j]+1)
-            local_B -= inv(a) * (digamma(x[i,j] + inv(a)) - digamma_inva)
-            local_B -= inv(a) * log1p(-pi_ij) + (x[i,j] + inv(a)) * pi_ij
-        end
-        B_accumulator[Threads.threadid()] += local_B
-    end
-    new_a = a * (-sum(sum_x) / sum(B_accumulator))
+    new_a = __mm_new_a_param__(model, buffers)
 
     update_expectations!(model)
     new_parameters = (scale=inv(new_a), dispersion=new_a)
     return remake_model!(model, new_parameters)
 end
 
-# Case: any edge distribution, with covariates
+# Case: PoissonEdges, with covariates
 function update!(::PoissonEdges, ::AbstractMatrix, model, buffers)
-    b = model.coefficient
-    v = buffers.newton_direction
-    d1f = buffers.gradient
-    d2f = buffers.hessian
-    T = eltype(v)
-
-    # Update propensities with Newton's method
-    logl_old = __eval_loglikelihood_threaded__(model, buffers)
-    cholH = cholesky!(Symmetric(d2f, :L))
-    ldiv!(v, cholH, d1f)
-    t = 1.0
-    max_backtracking = 8
-    for step in 0:max_backtracking
-        axpy!(t, v, b)
-        update_expectations!(model)
-        logl_new =__eval_loglikelihood_threaded__(model, buffers)
-        if logl_new > logl_old || step == max_backtracking
-            break
-        end
-        axpy!(-t, v, b)
-        t = t / 2
-    end
+    # Update coefficients with Newton's method
+    __newton_new_coefficients__(model, buffers)
 
     return model
 end
 
-function update!(::NegBinEdges, ::AbstractMatrix, model, buffers)
-    b = model.coefficient
-    v = buffers.newton_direction
-    d1f = buffers.gradient
-    d2f = buffers.hessian
-    T = eltype(v)
-
-    # Update propensities with Newton's method
-    logl_old = __eval_loglikelihood_threaded__(model, buffers)
-    cholH = cholesky!(Symmetric(d2f, :L))
-    ldiv!(v, cholH, d1f)
-    t = 1.0
-    max_backtracking = 8
-    for step in 0:max_backtracking
-        axpy!(t, v, b)
-        update_expectations!(model)
-        logl_new =__eval_loglikelihood_threaded__(model, buffers)
-        if logl_new > logl_old || step == max_backtracking
-            break
-        end
-        axpy!(-t, v, b)
-        t = t / 2
-    end
+# Case: NegBinEdges, mean-scale, with covariates
+function update!(::NegBinEdges{MeanScale}, ::AbstractMatrix, model, buffers)
+    # Update coefficients with Newton's method
+    __newton_new_coefficients__(model, buffers)
 
     # Update scale parameter, r.
-    p = model.propensity
-    r = model.parameters.scale
-    mu = model.expected
-    x = model.observed
-    
-    A_accumulator = buffers.accumulator[1]
-    B_accumulator = buffers.accumulator[2]
-    fill!(A_accumulator, 0)
-    fill!(B_accumulator, 0)
-    digamma_r = digamma(r)
-    @batch per=core for j in eachindex(p)
-        local_A = 0.0
-        local_B = 0.0
-        for i in eachindex(p)
-            if i == j continue end
-            pi_ij = mu[i,j] / (mu[i,j]+r)
-            local_A -= r*(digamma(x[i,j]+r) - digamma_r)
-            local_B += log1p(-pi_ij) + (mu[i,j] - x[i,j]) / (mu[i,j] + r)
-        end
-        A_accumulator[Threads.threadid()] += local_A
-        B_accumulator[Threads.threadid()] += local_B
-    end
-    new_r = sum(A_accumulator) / sum(B_accumulator)
+    new_r = __mm_new_r_param__(model, buffers)
 
     update_expectations!(model)
     new_parameters = (scale=new_r, dispersion=inv(new_r))
+
+    return remake_model!(model, new_parameters)
+end
+
+# Case: NegBinEdges, mean-dispersion, with covariates
+function update!(::NegBinEdges{MeanDispersion}, ::AbstractMatrix, model, buffers)
+    # Update coefficients with Newton's method
+    __newton_new_coefficients__(model, buffers)
+
+    # Update dispersion parameter, a.
+    new_a = __mm_new_a_param__(model, buffers)
+
+    update_expectations!(model)
+    new_parameters = (scale=inv(new_a), dispersion=new_a)
 
     return remake_model!(model, new_parameters)
 end

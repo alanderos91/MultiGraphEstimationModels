@@ -39,9 +39,6 @@ end
 
 function allocate_propensities(observed)
     p = zeros(Float64, size(observed, 1))
-    m = length(p)
-    sum_x = sum(observed)
-    @. p = sqrt( sum_x / (m * (m-1)) )
     return p
 end
 
@@ -95,17 +92,7 @@ function MultiGraphModel(dist::PoissonEdges, observed, covariates)
 end
 
 function MultiGraphModel(dist::NegBinEdges, observed, covariates)
-    nzdata = eltype(observed)[]
-    for j in axes(observed, 2), i in axes(observed, 1)
-        if i == j continue end
-        push!(nzdata, observed[i,j])
-    end
-    xbar = mean(nzdata)
-    s2 = var(nzdata, mean=xbar)
-    r = xbar^2 / (s2 - xbar)
-    if r < 0
-        @warn "Initialization of scale parameter r using method of moments failed" sample_mean=xbar sample_variance=s2 
-    end
+    r = Inf
     params = (scale=r, dispersion=1/r)
     MultiGraphModel(dist, observed, covariates, params)
 end
@@ -625,11 +612,10 @@ function __mle_loop__(model, buffers, maxiter, tolerance)
 end
 
 function init_model(::PoissonEdges, model)
+    m = length(model.propensity)
+    sum_x = sum(model.observed)
+    model.propensity .= sqrt( sum_x / (m * (m-1)) )
     if !(model.covariate isa Nothing)
-        m = length(model.propensity)
-        sum_x = sum(model.observed)
-        model.propensity .= sqrt( sum_x / (m * (m-1)) )
-
         A = copy(model.covariate)       # LHS
         b = A * log.(model.propensity)  # RHS
         qrA = qr!(A')                   # in-place QR decomposition of A
@@ -642,24 +628,41 @@ function init_model(::PoissonEdges, model)
 end
 
 function init_model(::NegBinEdges, model)
+    # initialize with rough estimates under Poisson model
+    init = MultiGraphModel(PoissonEdges(), model.observed, model.covariate)
+    copyto!(init.propensity, model.propensity)
+    update_expectations!(init)
+    result = fit_model(init; maxiter=10)
+    copyto!(model.propensity, result.fitted.propensity)
     if !(model.covariate isa Nothing)
-        m = length(model.propensity)
-        sum_x = sum(model.observed)
-        model.propensity .= sqrt( sum_x / (m * (m-1)) )
-
-        A = copy(model.covariate)       # LHS
-        b = A * log.(model.propensity)  # RHS
-        qrA = qr!(A')                   # in-place QR decomposition of A
-        R = LowerTriangular(qrA.R)      # R factor, wrapped as UpperTriangular for dispatch
-        y = R' \ b                      # Solve R'y = b
-        ldiv!(model.coefficient, R, y)  # Solve R*x = y
-    else
-        init = MultiGraphModel(PoissonEdges(), model.observed, model.covariate)
-        copyto!(init.propensity, model.propensity)
-        update_expectations!(init)
-        result = fit_model(init)
-        copyto!(model.propensity, result.fitted.propensity)
+        copyto!(model.coefficient, result.fitted.coefficient)
     end
+
+    # use MoM estimator for r
+    nzdata = eltype(model.observed)[]
+    for j in axes(model.observed, 2), i in axes(model.observed, 1)
+        if i == j continue end
+        push!(nzdata, model.observed[i,j])
+    end
+    xbar = mean(nzdata)
+    s2 = var(nzdata, mean=xbar)
+    r_init = xbar^2 / (s2 - xbar)
+    if r_init < 0
+        @warn "Initialization of scale parameter r using method of moments failed" sample_mean=xbar sample_variance=s2 
+    end
+
+    # calibrate by searching over logarithmic grid
+    best_r, best_logl = r_init, -Inf
+    for x in range(-3, 3, step=0.5)
+        r = r_init * 10.0 ^ x
+        model = remake_model!(model, (scale=r, dispersion=inv(r)))
+        update_expectations!(model)
+        logl = eval_loglikelihood(model, nothing, nothing)
+        if logl > best_logl
+            best_r, best_logl = r, logl
+        end
+    end
+    model = remake_model!(model, (scale=best_r, dispersion=inv(best_r)))
     update_expectations!(model)
     return model
 end

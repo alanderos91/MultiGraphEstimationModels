@@ -561,7 +561,7 @@ function __allocate_buffers__(::NegBinEdges, p, Z::AbstractMatrix)
     return buffers
 end
 
-function __mle_loop__(model, buffers, maxiter, tolerance)
+function __mle_loop__(model, buffers, maxiter, tolerance, verbose)
     # initialize constants
     sum!(buffers.sum_x, model.observed)
 
@@ -594,9 +594,9 @@ function __mle_loop__(model, buffers, maxiter, tolerance)
         end
     end
 
-    if converged
+    if converged && verbose
         @info "Converged after $(iter) iterations." loglikelihood=old_logl initial=init_logl
-    else
+    elseif verbose
         @info "Failed to converge after $(iter) iterations." loglikelihood=old_logl initial=init_logl
     end
 
@@ -632,7 +632,7 @@ function init_model(::NegBinEdges, model)
     init = MultiGraphModel(PoissonEdges(), model.observed, model.covariate)
     copyto!(init.propensity, model.propensity)
     update_expectations!(init)
-    result = fit_model(init; maxiter=10)
+    result = fit_model(init; maxiter=5, verbose=false)
     copyto!(model.propensity, result.fitted.propensity)
     if !(model.covariate isa Nothing)
         copyto!(model.coefficient, result.fitted.coefficient)
@@ -700,10 +700,10 @@ fit_model(model::MultiGraphModel{DIST}; maxiter::Real=100, tolerance::Real=1e-6)
 
 Estimate the parameters of the given `model` using MLE.
 """
-function fit_model(model::MultiGraphModel{DIST}; maxiter::Real=100, tolerance::Real=1e-6) where DIST
+function fit_model(model::MultiGraphModel{DIST}; maxiter::Real=100, tolerance::Real=1e-6, verbose::Bool=true) where DIST
     buffers = __allocate_buffers__(DIST(), model.propensity, model.covariate)
     model = init_model(DIST(), model)
-    __mle_loop__(model, buffers, maxiter, tolerance)
+    __mle_loop__(model, buffers, maxiter, tolerance, verbose)
 end
 
 export fit_model

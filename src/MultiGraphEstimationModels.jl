@@ -579,7 +579,7 @@ function __mle_loop__(model, buffers, maxiter, tolerance, verbose)
         rel_tolerance = tolerance * (1 + abs(old_logl))
 
         # Check for ascent and convergence.
-        if increase > 0
+        if increase >= 0
             old_logl = logl
             converged = increase < rel_tolerance
             if converged
@@ -827,8 +827,8 @@ function update!(::NegBinEdges{MeanScale}, ::Nothing, model, buffers)
 
     # Update scale parameter, r.
     new_r = __mm_new_r_param__(model, buffers)
-
     update_expectations!(model)
+
     new_parameters = (scale=new_r, dispersion=inv(new_r))
     return remake_model!(model, new_parameters)
 end
@@ -857,8 +857,8 @@ function update!(::NegBinEdges{MeanDispersion}, ::Nothing, model, buffers)
 
     # Update dispersion parameter, a.
     new_a = __mm_new_a_param__(model, buffers)
-
     update_expectations!(model)
+
     new_parameters = (scale=inv(new_a), dispersion=new_a)
     return remake_model!(model, new_parameters)
 end
@@ -867,6 +867,7 @@ end
 function update!(::PoissonEdges, ::AbstractMatrix, model, buffers)
     # Update coefficients with Newton's method
     __newton_new_coefficients__(model, buffers)
+    update_expectations!(model)
 
     return model
 end
@@ -875,13 +876,13 @@ end
 function update!(::NegBinEdges{MeanScale}, ::AbstractMatrix, model, buffers)
     # Update coefficients with Newton's method
     __newton_new_coefficients__(model, buffers)
+    update_expectations!(model)
 
     # Update scale parameter, r.
     new_r = __mm_new_r_param__(model, buffers)
-
     update_expectations!(model)
-    new_parameters = (scale=new_r, dispersion=inv(new_r))
 
+    new_parameters = (scale=new_r, dispersion=inv(new_r))
     return remake_model!(model, new_parameters)
 end
 
@@ -889,13 +890,13 @@ end
 function update!(::NegBinEdges{MeanDispersion}, ::AbstractMatrix, model, buffers)
     # Update coefficients with Newton's method
     __newton_new_coefficients__(model, buffers)
+    update_expectations!(model)
 
     # Update dispersion parameter, a.
     new_a = __mm_new_a_param__(model, buffers)
-
     update_expectations!(model)
-    new_parameters = (scale=inv(new_a), dispersion=new_a)
 
+    new_parameters = (scale=inv(new_a), dispersion=new_a)
     return remake_model!(model, new_parameters)
 end
 

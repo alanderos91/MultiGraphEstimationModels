@@ -217,13 +217,12 @@ function simulate_covariate_model(::PoissonEdges, nnodes::Int, ncovar::Int; seed
     σ = std(design_matrix, dims=2)
     covariate = (design_matrix .- μ) ./ σ
 
-    # draw effect sizes uniformly from [-3, 3] 
-    coefficient = zeros(ncovar)
-    coefficient[1] = 3*(2*rand(rng)-1)
-    coefficient[2:ncovar] = 1e-1*randn(rng, ncovar-1)
+    # approximately generate coefficients that produce propensities in [0,10]
+    response = -randexp(rng, nnodes) .+ log(10)
+    coefficient = covariate' \ (log(10, nnodes) * response)
 
     # simulate propensities
-    propensity = @views [exp(dot(covariate[:,i], coefficient)) for i in 1:nnodes]
+    propensity = @views [min(625.0, exp(dot(covariate[:,i], coefficient))) for i in 1:nnodes]
 
     # simulate Poisson expectations and data
     expected = zeros(Float64, nnodes, nnodes)
@@ -254,13 +253,12 @@ function simulate_covariate_model(dist::NegBinEdges, nnodes::Int, ncovar::Int; d
     σ = std(design_matrix, dims=2)
     covariate = (design_matrix .- μ) ./ σ
 
-    # draw effect sizes uniformly from [-3, 3] 
-    coefficient = zeros(ncovar)
-    coefficient[1] = 3*(2*rand(rng)-1)
-    coefficient[2:ncovar] = 1e-1*randn(rng, ncovar-1)
+    # approximately generate coefficients that produce propensities in [0,10]
+    response = -log(10, nnodes) .* log.(randn(rng, nnodes) .^ 2)
+    coefficient = covariate' \ response
 
     # simulate propensities
-    propensity = @views [exp(dot(covariate[:,i], coefficient)) for i in 1:nnodes]
+    propensity = @views [min(625.0, exp(dot(covariate[:,i], coefficient))) for i in 1:nnodes]
 
     # set scale parameter, r = 1/dispersion
     r = 1 / dispersion
@@ -588,7 +586,7 @@ function __mle_loop__(model, buffers, maxiter, tolerance, verbose)
                 break
             end
         else
-            @warn "Ascent condition failed; exiting after $(iter) iterations." loglikelihood=logl previous=old_logl
+            @warn "Ascent condition failed; exiting after $(iter) iterations." model=model loglikelihood=logl previous=old_logl
             old_logl = logl
             break
         end
@@ -617,11 +615,8 @@ function init_model(::PoissonEdges, model)
     model.propensity .= sqrt( sum_x / (m * (m-1)) )
     if !(model.covariate isa Nothing)
         A = copy(model.covariate)       # LHS
-        b = A * log.(model.propensity)  # RHS
-        qrA = qr!(A')                   # in-place QR decomposition of A
-        R = LowerTriangular(qrA.R)      # R factor, wrapped as UpperTriangular for dispatch
-        y = R' \ b                      # Solve R'y = b
-        ldiv!(model.coefficient, R, y)  # Solve R*x = y
+        b = log.(model.propensity)      # RHS
+        model.coefficient .= A' \ b
     end
     update_expectations!(model)
     return model
@@ -630,25 +625,25 @@ end
 function init_model(::NegBinEdges, model)
     # initialize with rough estimates under Poisson model
     init = MultiGraphModel(PoissonEdges(), model.observed, model.covariate)
-    copyto!(init.propensity, model.propensity)
-    update_expectations!(init)
     result = fit_model(init; maxiter=5, verbose=false)
-    copyto!(model.propensity, result.fitted.propensity)
     if !(model.covariate isa Nothing)
         copyto!(model.coefficient, result.fitted.coefficient)
+    else
+        copyto!(model.propensity, result.fitted.propensity)
     end
+    update_expectations!(model)
 
     # use MoM estimator for r
     nzdata = eltype(model.observed)[]
-    for j in axes(model.observed, 2), i in axes(model.observed, 1)
-        if i == j continue end
+    for j in axes(model.observed, 2), i in 1:j-1
         push!(nzdata, model.observed[i,j])
     end
     xbar = mean(nzdata)
     s2 = var(nzdata, mean=xbar)
     r_init = xbar^2 / (s2 - xbar)
     if r_init < 0
-        @warn "Initialization of scale parameter r using method of moments failed" sample_mean=xbar sample_variance=s2 
+        @warn "Initialization of scale parameter r using method of moments failed. Defaulting to r=1." sample_mean=xbar sample_variance=s2
+        r_init = one(r_init)
     end
 
     # calibrate by searching over logarithmic grid

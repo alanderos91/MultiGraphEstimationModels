@@ -628,8 +628,11 @@ function init_model(::PoissonEdges, model)
     sum_x = sum(model.observed)
     model.propensity .= sqrt( sum_x / (m * (m-1)) )
     if !(model.covariate isa Nothing)
-        A = copy(model.covariate)       # LHS
-        b = log.(model.propensity)      # RHS
+        # initialize with rough estimates of propensities under Poisson model without covariates
+        result = fit_model(PoissonEdges(), model.observed; maxiter=5, verbose=false)
+        @show result.fitted.propensity
+        A = copy(model.covariate)           # LHS
+        b = log.(result.fitted.propensity)  # RHS
         model.coefficient .= A' \ b
     end
     update_expectations!(model)
@@ -637,13 +640,16 @@ function init_model(::PoissonEdges, model)
 end
 
 function init_model(::NegBinEdges, model)
-    # initialize with rough estimates under Poisson model
-    init = MultiGraphModel(PoissonEdges(), model.observed, model.covariate)
-    result = fit_model(init; maxiter=5, verbose=false)
-    if !(model.covariate isa Nothing)
-        copyto!(model.coefficient, result.fitted.coefficient)
-    else
+    if model.covariate isa Nothing
+        # initialize with rough estimates under Poisson model
+        result = fit_model(PoissonEdges(), model.observed, model.covariate; maxiter=5, verbose=false)
         copyto!(model.propensity, result.fitted.propensity)
+    else
+        # initialize with rough estimates of propensities under negative binomial model without covariates
+        result = fit_model(NegBinEdges(), model.observed; maxiter=5, verbose=false)
+        A = copy(model.covariate)           # LHS
+        b = log.(result.fitted.propensity)  # RHS
+        model.coefficient .= A' \ b
     end
     update_expectations!(model)
 

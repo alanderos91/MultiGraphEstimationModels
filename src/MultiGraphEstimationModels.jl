@@ -565,12 +565,20 @@ function __mle_loop__(model, buffers, maxiter, tolerance, verbose)
 
     init_logl = old_logl = eval_loglikelihood(model, buffers)
     iter = 0
-    converged = false    
+    converged = false
+    old_p = copy(model.propensity)
+    old_b = model.covariate isa Nothing ? nothing : copy(model.coefficient)
+    old_params = model.parameters
 
     for _ in 1:maxiter
         iter += 1
 
         # Update propensities and additional parameters.
+        if model.covariate isa Nothing
+            old_p .= model.propensity
+        else
+            old_b .= model.coefficient
+        end
         model = update!(model, buffers)
 
         # Evaluate model.
@@ -579,7 +587,7 @@ function __mle_loop__(model, buffers, maxiter, tolerance, verbose)
         rel_tolerance = tolerance * (1 + abs(old_logl))
 
         # Check for ascent and convergence.
-        if increase >= 0
+        if increase >= 0 || abs(increase) < 1e-4
             old_logl = logl
             converged = increase < rel_tolerance
             if converged
@@ -587,7 +595,13 @@ function __mle_loop__(model, buffers, maxiter, tolerance, verbose)
             end
         else
             @warn "Ascent condition failed; exiting after $(iter) iterations." model=model loglikelihood=logl previous=old_logl
-            old_logl = logl
+            if model.covariate isa Nothing
+                model.propensity .= old_p
+            else
+                model.coefficient .= old_b
+            end
+            model = remake_model!(model, old_params)
+            update_expectations!(model)
             break
         end
     end
@@ -770,7 +784,8 @@ function __newton_new_coefficients__(model, buffers)
     cholH = cholesky!(Symmetric(d2f, :L))
     ldiv!(v, cholH, d1f)
     t = 1.0
-    max_backtracking = 8
+    max_backtracking = 32
+
     for step in 0:max_backtracking
         axpy!(t, v, b)
         update_expectations!(model)

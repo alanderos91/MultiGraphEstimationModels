@@ -153,21 +153,54 @@ export PoissonEdges, NBParam, MeanScale, MeanDispersion, NegBinEdges, MultiGraph
 #   SIMULATION
 #
 
+function simulate_with_pois!(rng, observed, expected, propensity)
+    # this assumes propensity[i] > 0 for every node i
+    any(isequal(0), propensity) && error("Cannot simulate multigraph with disconnected node")
+    nnodes = length(propensity)
+    for j in 1:nnodes-1
+        node_degree = 0
+        while node_degree == 0
+            for i in j+1:nnodes
+                mu_ij = propensity[i] * propensity[j]
+                observed[i,j] = observed[j,i] = pois_rand(rng, mu_ij)
+                expected[i,j] = expected[j,i] = mu_ij
+                node_degree += observed[i,j]
+            end
+        end
+    end
+end
+
+function simulate_with_nbin!(rng, observed, expected, propensity, r)
+    # this assumes propensity[i] > 0 for every node i
+    any(isequal(0), propensity) && error("Cannot simulate multigraph with disconnected node")
+    nnodes = length(propensity)
+    for j in 1:nnodes-1
+        node_degree = 0
+        while node_degree == 0
+            for i in j+1:nnodes
+                mu_ij = propensity[i] * propensity[j]
+                pi_ij = mu_ij / (mu_ij + r)
+                D = NegativeBinomial(r, 1-pi_ij)
+                observed[i,j] = observed[j,i] = rand(rng, D)
+                expected[i,j] = expected[j,i] = mu_ij
+                node_degree += observed[i,j]
+            end
+        end
+    end
+end
+
 function simulate_propensity_model(::PoissonEdges, nnodes::Int; seed::Integer=1903)
     # initialize RNG
     rng = StableRNG(seed)
 
-    # draw propensities uniformly from (0, 10)
-    propensity = 10*rand(rng, nnodes)
+    # draw propensities uniformly from (0.5, 10)
+    a, b = 0.5, 10.0
+    propensity = (b-a) * rand(rng, nnodes) .+ a
 
     # simulate Poisson expectations and data
     expected = zeros(Float64, nnodes, nnodes)
     observed = zeros(Int, nnodes, nnodes)
-    for j in 1:nnodes, i in j+1:nnodes
-        mu_ij = propensity[i] * propensity[j]
-        observed[i,j] = observed[j,i] = pois_rand(rng, mu_ij)
-        expected[i,j] = expected[j,i] = mu_ij
-    end
+    simulate_with_pois!(rng, observed, expected, propensity)
 
     example = MultiGraphModel(PoissonEdges(), observed)
     copyto!(example.propensity, propensity)
@@ -180,8 +213,9 @@ function simulate_propensity_model(dist::NegBinEdges, nnodes::Int; dispersion::R
     # initialize RNG
     rng = StableRNG(seed)
 
-    # draw propensities uniformly from (0, 10)
-    propensity = 10*rand(rng, nnodes)
+    # draw propensities uniformly from (0.5, 10)
+    a, b = 0.5, 10.0
+    propensity = (b-a) * rand(rng, nnodes) .+ a
 
     # set scale parameter, r = 1/dispersion
     r = 1 / dispersion
@@ -189,13 +223,7 @@ function simulate_propensity_model(dist::NegBinEdges, nnodes::Int; dispersion::R
     # simulate Negative Binomial expectations and data
     expected = zeros(Float64, nnodes, nnodes)
     observed = zeros(Int, nnodes, nnodes)
-    for j in 1:nnodes, i in j+1:nnodes
-        mu_ij = propensity[i] * propensity[j]
-        pi_ij = mu_ij / (mu_ij + r)
-        D = NegativeBinomial(r, 1-pi_ij)
-        observed[i,j] = observed[j,i] = rand(rng, D)
-        expected[i,j] = expected[j,i] = mu_ij
-    end
+    simulate_with_nbin!(rng, observed, expected, propensity, r)
 
     params = (scale=r, dispersion=dispersion)
     example = MultiGraphModel(dist, observed, nothing, params)
@@ -217,8 +245,9 @@ function simulate_covariate_model(::PoissonEdges, nnodes::Int, ncovar::Int; seed
     σ = std(design_matrix, dims=2)
     covariate = (design_matrix .- μ) ./ σ
 
-    # approximately generate coefficients that produce propensities in [0,10]
-    response = -randexp(rng, nnodes) .+ log(10)
+    # approximately generate coefficients that produce propensities in (0.5, 10)
+    a, b = 0.5, 10.0
+    response = log.((b-a) * rand(rng, nnodes) .+ a)
     coefficient = covariate' \ (log(10, nnodes) * response)
 
     # simulate propensities
@@ -227,11 +256,7 @@ function simulate_covariate_model(::PoissonEdges, nnodes::Int, ncovar::Int; seed
     # simulate Poisson expectations and data
     expected = zeros(Float64, nnodes, nnodes)
     observed = zeros(Int, nnodes, nnodes)
-    for j in 1:nnodes, i in j+1:nnodes
-        mu_ij = propensity[i] * propensity[j]
-        observed[i,j] = observed[j,i] = pois_rand(rng, mu_ij)
-        expected[i,j] = expected[j,i] = mu_ij
-    end
+    simulate_with_pois!(rng, observed, expected, propensity)
 
     example = MultiGraphModel(PoissonEdges(), observed, covariate)
     copyto!(example.propensity, propensity)
@@ -253,9 +278,10 @@ function simulate_covariate_model(dist::NegBinEdges, nnodes::Int, ncovar::Int; d
     σ = std(design_matrix, dims=2)
     covariate = (design_matrix .- μ) ./ σ
 
-    # approximately generate coefficients that produce propensities in [0,10]
-    response = -log(10, nnodes) .* log.(randn(rng, nnodes) .^ 2)
-    coefficient = covariate' \ response
+    # approximately generate coefficients that produce propensities in (0.5, 10)
+    a, b = 0.5, 10.0
+    response = log.((b-a) * rand(rng, nnodes) .+ a)
+    coefficient = covariate' \ (log(10, nnodes) * response)
 
     # simulate propensities
     propensity = @views [min(625.0, exp(dot(covariate[:,i], coefficient))) for i in 1:nnodes]
@@ -266,13 +292,7 @@ function simulate_covariate_model(dist::NegBinEdges, nnodes::Int, ncovar::Int; d
     # simulate Negative Binomial expectations and data
     expected = zeros(Float64, nnodes, nnodes)
     observed = zeros(Int, nnodes, nnodes)
-    for j in 1:nnodes, i in j+1:nnodes
-        mu_ij = propensity[i] * propensity[j]
-        pi_ij = mu_ij / (mu_ij + r)
-        D = NegativeBinomial(r, 1-pi_ij)
-        observed[i,j] = observed[j,i] = rand(rng, D)
-        expected[i,j] = expected[j,i] = mu_ij
-    end
+    simulate_with_nbin!(rng, observed, expected, propensity, r)
 
     params = (scale=r, dispersion=dispersion)
     example = MultiGraphModel(dist, observed, covariate, params)
@@ -630,7 +650,6 @@ function init_model(::PoissonEdges, model)
     if !(model.covariate isa Nothing)
         # initialize with rough estimates of propensities under Poisson model without covariates
         result = fit_model(PoissonEdges(), model.observed; maxiter=5, verbose=false)
-        @show result.fitted.propensity
         A = copy(model.covariate)           # LHS
         b = log.(result.fitted.propensity)  # RHS
         model.coefficient .= A' \ b

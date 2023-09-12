@@ -804,7 +804,9 @@ function __newton_new_coefficients__(model, buffers)
     d2f = buffers.hessian
 
     logl_old = __eval_loglikelihood_threaded__(model, buffers)
-    cholH = cholesky!(Symmetric(d2f, :L))
+    H = Symmetric(d2f, :L)
+    H .= H + norm(H)*eps(eltype(H))*I
+    cholH = cholesky!(H)
     ldiv!(v, cholH, d1f)
     t = 1.0
     max_backtracking = 32

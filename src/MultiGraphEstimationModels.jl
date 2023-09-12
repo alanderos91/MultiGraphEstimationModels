@@ -495,25 +495,79 @@ function partial_loglikelihood(::NegBinEdges{MeanDispersion}, observed, expected
     return logpdf(NegativeBinomial(inv(a), 1-p), observed)
 end
 
-function partial_gradient!(::PoissonEdges, d1f, tmp, observed, expected, zi, zj)
-    α = observed - expected
-    @. tmp = zi + zj
-    
-    # update ∇logl = ∇logl + α(xᵢ+xⱼ)
-    axpy!(α, tmp, d1f)
-
-    return d1f
+function approx_standard_errors(model::MultiGraphModel{DIST}, option::Symbol) where DIST
+    if option == :propensity
+        expected_information = propensity_expected_information(DIST(), model)
+    else option == :coefficient
+        if isnothing(model.covariate)
+            error("Model does not contain any covariates! Did you mean to estimate standard errors for each `:propensity`?")
+        end
+        tmp = __allocate_buffers__(DIST(), model.propensity, model.covariate)
+        __eval_derivs!__(DIST(), model, tmp)
+        expected_information = tmp.hessian
+    end
+    return sqrt.(diag(inv(expected_information)))
 end
 
-function partial_hessian!(::PoissonEdges, d2f, tmp, observed, expected, zi, zj)
-    α = -expected
-    @. tmp = zi + zj
-    
-    # update ∇²logl = ∇²logl + α (xᵢ+xⱼ) (xᵢ+xⱼ)ᵀ
-    # only on the upper triangular half
-    BLAS.syr!('L', α, tmp, d2f)
+function propensity_expected_information(::PoissonEdges, model::MultiGraphModel)
+    p = model.propensity
+    m = length(p)
+    E = Matrix{Float64}(undef, m, m)
+    sum_p = sum(p)
+    for j in axes(E, 2), i in axes(E, 1)
+        if i == j
+            E[i,i] = 2 / p[i] * (sum_p - p[i])
+        else
+            E[i,j] = 2
+        end
+    end
+    return E
+end
 
-    return d2f
+function propensity_expected_information(::NegBinEdges{MeanScale}, model::MultiGraphModel)
+    p = model.propensity
+    m = length(p)
+    r = model.parameters.scale
+    E = Matrix{Float64}(undef, m, m)
+    for j in axes(E, 2), i in axes(E, 1)
+        if i == j
+            sum_p_weighted = 0.0
+            for k in axes(E, 1)
+                mu_ki = model.expected[k,i]
+                pi_ki = mu_ki / (mu_ki + r)
+                sum_p_weighted += p[k] * (1 - pi_ki)
+            end
+            E[i,i] = 2 * r / (p[i]^2) * sum_p_weighted
+        else
+            mu_ij = model.expected[i,j]
+            pi_ij = mu_ij / (mu_ij + r)
+            E[i,j] = 2 * (1 - pi_ij)
+        end
+    end
+    return E
+end
+
+function propensity_expected_information(::NegBinEdges{MeanDispersion}, model::MultiGraphModel)
+    p = model.propensity
+    m = length(p)
+    a = model.parameters.dispersion
+    E = Matrix{Float64}(undef, m, m)
+    for j in axes(E, 2), i in axes(E, 1)
+        if i == j
+            sum_p_weighted = 0.0
+            for k in axes(E, 1)
+                mu_ki = model.expected[k,i]
+                pi_ki = a*mu_ki / (a*mu_ki + 1)
+                sum_p_weighted += p[k] * (1 - pi_ki)
+            end
+            E[i,i] = 2 / p[i] * sum_p_weighted
+        else
+            mu_ij = model.expected[i,j]
+            pi_ij = a*mu_ij / (a*mu_ij + 1)
+            E[i,j] = 2 * (1 - pi_ij)
+        end
+    end
+    return E
 end
 
 #

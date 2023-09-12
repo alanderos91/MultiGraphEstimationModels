@@ -440,12 +440,11 @@ function __eval_derivs!__(::NegBinEdges{MeanScale}, model, buffers)
     @. d1f = 2*d1f
 
     # Hessian
-    @. tmp1 = (1 - M/(M+r))*M # element-wise operations
+    @. tmp1 = M / (M + r) # element-wise operations
     sum!(w, tmp1)
-    @. tmp1 = $Diagonal(w) + tmp1
+    @. tmp1 = 2*r*($Diagonal(w) + tmp1)
     mul!(transpose(tmp2), tmp1, transpose(X))
     mul!(d2f, X, transpose(tmp2))
-    @. d2f = 2*d2f
 
     return nothing
 end
@@ -469,12 +468,11 @@ function __eval_derivs!__(::NegBinEdges{MeanDispersion}, model, buffers)
     @. d1f = 2*d1f
 
     # Hessian
-    @. tmp1 = (1 - a*M/(a*M+1))*M # element-wise operations
+    @. tmp1 = a*M/(a*M + 1) # element-wise operations
     sum!(w, tmp1)
-    @. tmp1 = $Diagonal(w) + tmp1
+    @. tmp1 = 2*r*($Diagonal(w) + tmp1)
     mul!(transpose(tmp2), tmp1, transpose(X))
     mul!(d2f, X, transpose(tmp2))
-    @. d2f = 2*d2f
 
     return nothing
 end

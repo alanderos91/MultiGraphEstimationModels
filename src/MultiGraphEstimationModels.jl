@@ -193,8 +193,8 @@ function simulate_propensity_model(::PoissonEdges, nnodes::Int; seed::Integer=19
     # initialize RNG
     rng = StableRNG(seed)
 
-    # draw propensities uniformly from (0.5, 10)
-    a, b = 0.5, 10.0
+    # draw propensities uniformly from (2.0, 10)
+    a, b = 2.0, 10.0
     propensity = (b-a) * rand(rng, nnodes) .+ a
 
     # simulate Poisson expectations and data
@@ -213,8 +213,8 @@ function simulate_propensity_model(dist::NegBinEdges, nnodes::Int; dispersion::R
     # initialize RNG
     rng = StableRNG(seed)
 
-    # draw propensities uniformly from (0.5, 10)
-    a, b = 0.5, 10.0
+    # draw propensities uniformly from (2.0, 10)
+    a, b = 2.0, 10.0
     propensity = (b-a) * rand(rng, nnodes) .+ a
 
     # set scale parameter, r = 1/dispersion
@@ -245,8 +245,8 @@ function simulate_covariate_model(::PoissonEdges, nnodes::Int, ncovar::Int; seed
     σ = std(design_matrix, dims=2)
     covariate = (design_matrix .- μ) ./ σ
 
-    # approximately generate coefficients that produce propensities in (0.5, 10)
-    a, b = 0.5, 10.0
+    # approximately generate coefficients that produce propensities in (2.0, 10)
+    a, b = 2.0, 10.0
     response = log.((b-a) * rand(rng, nnodes) .+ a)
     coefficient = covariate' \ (log(10, nnodes) * response)
 
@@ -278,8 +278,8 @@ function simulate_covariate_model(dist::NegBinEdges, nnodes::Int, ncovar::Int; d
     σ = std(design_matrix, dims=2)
     covariate = (design_matrix .- μ) ./ σ
 
-    # approximately generate coefficients that produce propensities in (0.5, 10)
-    a, b = 0.5, 10.0
+    # approximately generate coefficients that produce propensities in (2.0, 10)
+    a, b = 2.0, 10.0
     response = log.((b-a) * rand(rng, nnodes) .+ a)
     coefficient = covariate' \ (log(10, nnodes) * response)
 

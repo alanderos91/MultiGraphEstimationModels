@@ -153,6 +153,10 @@ export PoissonEdges, NBParam, MeanScale, MeanDispersion, NegBinEdges, MultiGraph
 #   SIMULATION
 #
 
+function default_propensity(rng, nnodes)
+    rand(rng, Uniform(0.0, 4.0), nnodes)
+end
+
 function simulate_with_pois!(rng, observed, expected, propensity)
     # this assumes propensity[i] > 0 for every node i
     any(isequal(0), propensity) && error("Cannot simulate multigraph with disconnected node")
@@ -189,13 +193,13 @@ function simulate_with_nbin!(rng, observed, expected, propensity, r)
     end
 end
 
-function simulate_propensity_model(::PoissonEdges, nnodes::Int; seed::Integer=1903)
-    # initialize RNG
-    rng = StableRNG(seed)
-
-    # draw propensities uniformly from (2.0, 10)
-    a, b = 2.0, 10.0
-    propensity = (b-a) * rand(rng, nnodes) .+ a
+function simulate_propensity_model(::PoissonEdges, nnodes::Int;
+    rng::AbstractRNG=Random.GLOBAL_RNG,
+    propensity::AbstractVector=default_propensity(rng, nnodes),
+)
+    # sanity check
+    length(propensity) != nnodes && error("Number of nodes must match number of propensities.")
+    any(<=(0), propensity) && error("Propensities must be positive.")
 
     # simulate Poisson expectations and data
     expected = zeros(Float64, nnodes, nnodes)
@@ -209,13 +213,14 @@ function simulate_propensity_model(::PoissonEdges, nnodes::Int; seed::Integer=19
     return example
 end
 
-function simulate_propensity_model(dist::NegBinEdges, nnodes::Int; dispersion::Real=1.0, seed::Integer=1903)
-    # initialize RNG
-    rng = StableRNG(seed)
-
-    # draw propensities uniformly from (2.0, 10)
-    a, b = 2.0, 10.0
-    propensity = (b-a) * rand(rng, nnodes) .+ a
+function simulate_propensity_model(dist::NegBinEdges, nnodes::Int;
+    dispersion::Real=1.0,
+    rng::AbstractRNG=Random.GLOBAL_RNG,
+    propensity::AbstractVector=default_propensity(rng, nnodes),
+)
+    # sanity check
+    length(propensity) != nnodes && error("Number of nodes must match number of propensities.")
+    any(<=(0), propensity) && error("Propensities must be positive.")
 
     # set scale parameter, r = 1/dispersion
     r = 1 / dispersion
@@ -233,9 +238,13 @@ function simulate_propensity_model(dist::NegBinEdges, nnodes::Int; dispersion::R
     return example
 end
 
-function simulate_covariate_model(::PoissonEdges, nnodes::Int, ncovar::Int; seed::Integer=1903)
-    # initialize RNG
-    rng = StableRNG(seed)
+function simulate_covariate_model(::PoissonEdges, nnodes::Int, ncovar::Int;
+    rng::AbstractRNG=Random.GLOBAL_RNG,
+    propensity::AbstractVector=default_propensity(rng, nnodes),
+)
+    # sanity check
+    length(propensity) != nnodes && error("Number of nodes must match number of propensities.")
+    any(<=(0), propensity) && error("Propensities must be positive.")
 
     # simulate p covariates for each of the m nodes; iid N(0,1)
     design_matrix = randn(rng, ncovar, nnodes)
@@ -245,30 +254,34 @@ function simulate_covariate_model(::PoissonEdges, nnodes::Int, ncovar::Int; seed
     σ = std(design_matrix, dims=2)
     covariate = (design_matrix .- μ) ./ σ
 
-    # approximately generate coefficients that produce propensities in (2.0, 10)
-    a, b = 2.0, 10.0
-    response = log.((b-a) * rand(rng, nnodes) .+ a)
+    # approximately generate coefficients that produce the target propensity values
+    response = log.(propensity)
     coefficient = covariate' \ (log(10, nnodes) * response)
 
     # simulate propensities
-    propensity = @views [min(625.0, exp(dot(covariate[:,i], coefficient))) for i in 1:nnodes]
+    _propensity = @views [min(625.0, exp(dot(covariate[:,i], coefficient))) for i in 1:nnodes]
 
     # simulate Poisson expectations and data
     expected = zeros(Float64, nnodes, nnodes)
     observed = zeros(Int, nnodes, nnodes)
-    simulate_with_pois!(rng, observed, expected, propensity)
+    simulate_with_pois!(rng, observed, expected, _propensity)
 
     example = MultiGraphModel(PoissonEdges(), observed, covariate)
-    copyto!(example.propensity, propensity)
+    copyto!(example.propensity, _propensity)
     copyto!(example.coefficient, coefficient)
     copyto!(example.expected, expected)
 
     return example
 end
 
-function simulate_covariate_model(dist::NegBinEdges, nnodes::Int, ncovar::Int; dispersion::Real=1.0, seed::Integer=1903)
-    # initialize RNG
-    rng = StableRNG(seed)
+function simulate_covariate_model(dist::NegBinEdges, nnodes::Int, ncovar::Int;
+    dispersion::Real=1.0,
+    rng::AbstractRNG=Random.GLOBAL_RNG,
+    propensity::AbstractVector=default_propensity(rng, nnodes),    
+)
+    # sanity check
+    length(propensity) != nnodes && error("Number of nodes must match number of propensities.")
+    any(<=(0), propensity) && error("Propensities must be positive.")
 
     # simulate p covariates for each of the m nodes; iid N(0,1)
     design_matrix = randn(rng, ncovar, nnodes)
@@ -278,13 +291,12 @@ function simulate_covariate_model(dist::NegBinEdges, nnodes::Int, ncovar::Int; d
     σ = std(design_matrix, dims=2)
     covariate = (design_matrix .- μ) ./ σ
 
-    # approximately generate coefficients that produce propensities in (2.0, 10)
-    a, b = 2.0, 10.0
-    response = log.((b-a) * rand(rng, nnodes) .+ a)
+    # approximately generate coefficients that produce the target propensity values
+    response = log.(propensity)
     coefficient = covariate' \ (log(10, nnodes) * response)
 
     # simulate propensities
-    propensity = @views [min(625.0, exp(dot(covariate[:,i], coefficient))) for i in 1:nnodes]
+    _propensity = @views [min(625.0, exp(dot(covariate[:,i], coefficient))) for i in 1:nnodes]
 
     # set scale parameter, r = 1/dispersion
     r = 1 / dispersion
@@ -292,11 +304,11 @@ function simulate_covariate_model(dist::NegBinEdges, nnodes::Int, ncovar::Int; d
     # simulate Negative Binomial expectations and data
     expected = zeros(Float64, nnodes, nnodes)
     observed = zeros(Int, nnodes, nnodes)
-    simulate_with_nbin!(rng, observed, expected, propensity, r)
+    simulate_with_nbin!(rng, observed, expected, _propensity, r)
 
     params = (scale=r, dispersion=dispersion)
     example = MultiGraphModel(dist, observed, covariate, params)
-    copyto!(example.propensity, propensity)
+    copyto!(example.propensity, _propensity)
     copyto!(example.coefficient, coefficient)
     copyto!(example.expected, expected)
 

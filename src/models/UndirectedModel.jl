@@ -52,6 +52,15 @@ function update_expectations!(model::UndirectedMultiGraphModel, ::Nothing)
     end
 end
 
+function update_expectations!(model::UndirectedMultiGraphModel, ::Any)
+    p = model.propensity
+    X = model.covariate
+    b = model.coefficient
+    mul!(p, transpose(X), b)
+    @. p = min(625.0, exp(p))
+    update_expectations!(model, nothing)
+end
+
 function remake_model!(model::UndirectedMultiGraphModel{distT}, new_params) where distT
     intT, floatT = eltype(model.observed), eltype(model.expected)
     covT, coeffT, paramT = typeof(model.covariate), typeof(model.coefficient), typeof(new_params)
@@ -250,12 +259,14 @@ function backtrack_to_old_state!(model::UndirectedMultiGraphModel, state, ::Noth
     @. model.propensity = state.p
     model = remake_model!(model, state.params)
     update_expectations!(model)
+    return model
 end
 
 function backtrack_to_old_state!(model::UndirectedMultiGraphModel, state, ::Any)
     @. model.coefficient = state.b
     model = remake_model!(model, state.params)
     update_expectations!(model)
+    return model
 end
 
 function __allocate_buffers__(model::UndirectedMultiGraphModel{distT}) where distT

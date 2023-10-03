@@ -60,15 +60,6 @@ function update_expectations!(model::AbstractMultiGraphModel)
     update_expectations!(model, model.covariate)
 end
 
-function update_expectations!(model::AbstractMultiGraphModel, ::Any)
-    p = model.propensity
-    X = model.covariate
-    b = model.coefficient
-    mul!(p, transpose(X), b)
-    @. p = min(625.0, exp(p))
-    update_expectations!(model, nothing)
-end
-
 include(joinpath("models", "UndirectedModel.jl"))
 
 export UndirectedMultiGraphModel
@@ -373,7 +364,7 @@ function __mle_loop__(model::AbstractMultiGraphModel, buffers, maxiter, toleranc
             end
         else
             @warn "Ascent condition failed; exiting after $(iter) iterations." model=model loglikelihood=logl previous=old_logl
-            backtrack_to_old_state!(model, old_state)
+            model = backtrack_to_old_state!(model, old_state)
             break
         end
     end
@@ -428,7 +419,7 @@ fit_model(model::MultiGraphModel{DIST}; maxiter::Real=100, tolerance::Real=1e-6)
 
 Estimate the parameters of the given `model` using MLE.
 """
-function fit_model(model::AbstractMultiGraphModel; maxiter::Real=100, tolerance::Real=1e-6, verbose::Bool=true) where distT
+function fit_model(model::AbstractMultiGraphModel; maxiter::Real=100, tolerance::Real=1e-6, verbose::Bool=true)
     buffers = __allocate_buffers__(model)
     model = init_model(model)
     __mle_loop__(model, buffers, maxiter, tolerance, verbose)

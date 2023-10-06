@@ -60,6 +60,10 @@ function update_expectations!(model::AbstractMultiGraphModel)
     update_expectations!(model, model.covariate)
 end
 
+function __allocate_buffers__(model::AbstractMultiGraphModel{distT}) where distT
+    __allocate_buffers__(distT(), model)
+end
+
 include(joinpath("models", "UndirectedModel.jl"))
 
 export UndirectedMultiGraphModel

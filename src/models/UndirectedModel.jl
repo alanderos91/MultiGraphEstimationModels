@@ -269,8 +269,8 @@ function backtrack_to_old_state!(model::UndirectedMultiGraphModel, state, ::Any)
     return model
 end
 
-function __allocate_buffers__(model::UndirectedMultiGraphModel{distT}) where distT
-    __allocate_buffers__(distT(), model.propensity, model.covariate)
+function __allocate_buffers__(dist, model::UndirectedMultiGraphModel)
+    __allocate_buffers__(dist, model.propensity, model.covariate)
 end
 
 function init_model(::PoissonEdges, model::UndirectedMultiGraphModel)

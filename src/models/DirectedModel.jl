@@ -58,13 +58,8 @@ function update_expectations!(model::DirectedMultiGraphModel, ::Nothing)
     mu = model.expected
     @batch per=core for j in eachindex(p)
         for i in eachindex(p)
-            if i == j # diagonal
-                continue
-            elseif i > j # lower triangle, incoming
-                mu[i,j] = q[i] * p[j]
-            else # i < j, upper triangle, outgoing
-                mu[i,j] = p[i] * q[j]
-            end
+            if i == j continue end
+            mu[i,j] = p[i] * q[j]
         end
     end
 end
@@ -141,22 +136,22 @@ function backtrack_to_old_state!(model::DirectedMultiGraphModel, state, ::Any)
 end
 
 function __allocate_buffers__(dist, model::DirectedMultiGraphModel)
-    __allocate_buffers__(dist, model.propensity_in, model.propensity_out, model.covariate)
+    __allocate_buffers__(dist, model.propensity_out, model.propensity_in, model.covariate)
 end
 
 function init_model(::PoissonEdges, model::DirectedMultiGraphModel)
-    m = length(model.propensity_in)
+    m = length(model.propensity_out)
     sum_Z = sum(model.observed)
-    model.propensity_in .= sqrt( sum_Z / (m * (m-1)) )
-    model.propensity_out .= model.propensity_in
+    model.propensity_out .= sqrt( sum_Z / (m * (m-1)) )
+    model.propensity_in .= model.propensity_out
     if !(model.covariate isa Nothing)
         # initialize with rough estimates of propensities under Poisson model without covariates
         result = fit_model(PoissonEdges(), model.observed; directed=true, maxiter=5, verbose=false)
         A = copy(model.covariate)              # LHS
-        b = log.(result.fitted.propensity_in)  # RHS
-        model.coefficient_in .= A' \ b
         b = log.(result.fitted.propensity_out) # RHS
         model.coefficient_out .= A' \ b
+        b = log.(result.fitted.propensity_in)  # RHS
+        model.coefficient_in .= A' \ b
     end
     update_expectations!(model)
     return model
@@ -164,7 +159,7 @@ end
 
 # Case: PoissonEdges, no covariates
 function update!(dist::PoissonEdges, ::Nothing, model::DirectedMultiGraphModel, buffers)
-    __mm_new_propensity!__(dist, model.propensity_in, buffers.old_p, model.propensity_out, buffers.old_q, buffers.sum_Z_row, buffers.sum_Z_col)
+    __mm_new_propensity!__(dist, model.propensity_out, buffers.old_p, model.propensity_in, buffers.old_q, buffers.sum_Z_row, buffers.sum_Z_col)
     update_expectations!(model)
     return model
 end

@@ -65,8 +65,9 @@ function __allocate_buffers__(model::AbstractMultiGraphModel{distT}) where distT
 end
 
 include(joinpath("models", "UndirectedModel.jl"))
+include(joinpath("models", "DirectedModel.jl"))
 
-export UndirectedMultiGraphModel
+export UndirectedMultiGraphModel, DirectedMultiGraphModel
 
 #
 #   SIMULATION
@@ -256,15 +257,15 @@ end
 
 # no covariates
 function __eval_loglikelihood_unthreaded__(model::AbstractMultiGraphModel{distT}) where distT
-    p = model.propensity
+    m = size(model.observed, 1)
     logl = 0.0
-    for j in eachindex(p), i in eachindex(p)
+    for j in Base.OneTo(m), i in Base.OneTo(m)
         if i == j continue end
-        x_ij = model.observed[i,j]
-        mu_ij = model.expected[i,j]
-        logl_ij = partial_loglikelihood(distT(), x_ij, mu_ij, model.parameters)
+        Z_ij = model.observed[i,j]
+        M_ij = model.expected[i,j]
+        logl_ij = partial_loglikelihood(distT(), Z_ij, M_ij, model.parameters)
         if isnan(logl_ij)
-            error("Detected NaN for edges between $i and $j. $x_ij and $mu_ij")
+            error("Detected NaN for edges between $i and $j. $Z_ij and $M_ij")
         end
         logl += logl_ij
     end
@@ -272,18 +273,18 @@ function __eval_loglikelihood_unthreaded__(model::AbstractMultiGraphModel{distT}
 end
 
 function __eval_loglikelihood_threaded__(model::AbstractMultiGraphModel{distT}, buffers) where distT
-    p = model.propensity
+    m = size(model.observed, 1)
     accumulator = buffers.accumulator[1]
     fill!(accumulator, 0)
-    @batch per=core for j in eachindex(p)
+    @batch per=core for j in Base.OneTo(m)
         local_logl = 0.0
-        for i in eachindex(p)
+        for i in Base.OneTo(m)
             if i == j continue end
-            x_ij = model.observed[i,j]
-            mu_ij = model.expected[i,j]
-            logl_ij = partial_loglikelihood(distT(), x_ij, mu_ij, model.parameters)
+            Z_ij = model.observed[i,j]
+            M_ij = model.expected[i,j]
+            logl_ij = partial_loglikelihood(distT(), Z_ij, M_ij, model.parameters)
             if isnan(logl_ij)
-                error("Detected NaN for edges between $i and $j. $x_ij and $mu_ij")
+                error("Detected NaN for edges between $i and $j. $Z_ij and $M_ij")
             end
             local_logl += logl_ij
         end
@@ -397,9 +398,13 @@ fit_model(dist::AbstractEdgeDistribution, observed; kwargs...)
 
 Fit a propensity-based model to the `observed` data assuming a `dist` edge distribution.
 """
-function fit_model(dist::AbstractEdgeDistribution, observed; kwargs...)
+function fit_model(dist::AbstractEdgeDistribution, observed; directed::Bool=false, kwargs...)
     #
-    model = UndirectedMultiGraphModel(dist, observed)
+    if directed
+        model = DirectedMultiGraphModel(dist, observed)
+    else
+        model = UndirectedMultiGraphModel(dist, observed)
+    end
     fit_model(model; kwargs...)
 end
 
@@ -435,12 +440,25 @@ export fit_model
 #   ALGORITHM MAPS
 #
 
-function __mm_new_propensity!__(::PoissonEdges, propensity, old_propensity, sum_Z)
-    copyto!(old_propensity, propensity)
-    sum_propensity = sum(propensity)
-    @batch per=core for i in eachindex(propensity)
-        sum_propensity_i = sum_propensity - old_propensity[i]
-        propensity[i] = sqrt(old_propensity[i] * sum_Z[i] / sum_propensity_i)
+function __mm_new_propensity!__(::PoissonEdges, p, old_p, sum_Z)
+    copyto!(old_p, p)
+    sum_p = sum(p)
+    @batch per=core for i in eachindex(p)
+        sum_p_i = sum_p - old_p[i]
+        p[i] = sqrt(old_p[i] * sum_Z[i] / sum_p_i)
+    end
+end
+
+function __mm_new_propensity!__(::PoissonEdges, p, old_p, q, old_q, sum_Z_row, sum_Z_col)
+    copyto!(old_p, p)
+    copyto!(old_q, q)
+    sum_p = sum(p)
+    sum_q = sum(q)
+    @batch per=core for i in eachindex(p)
+        sum_p_i = sum_p - old_p[i]
+        sum_q_i = sum_q - old_q[i]
+        p[i] = sqrt(old_p[i] * sum_Z_row[i] / sum_q_i)
+        q[i] = sqrt(old_q[i] * sum_Z_col[i] / sum_p_i)
     end
 end
 

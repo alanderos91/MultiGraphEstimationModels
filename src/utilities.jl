@@ -35,6 +35,18 @@ function __allocate_buffers__(::PoissonEdges, p, ::Nothing)
     return buffers
 end
 
+# Case: PoissonEdges, directed, no covariates
+function __allocate_buffers__(::PoissonEdges, p, q, ::Nothing)
+    buffers = (;
+        sum_Z_row=zeros(Int, length(p)),
+        sum_Z_col=zeros(Int, length(q)),
+        old_p=similar(p),
+        old_q=similar(q),
+        accumulator=[zeros(Threads.nthreads()) for _ in 1:1],
+    )
+    return buffers
+end
+
 # Case: NegBinEdges, undirected, no covariates
 function __allocate_buffers__(::NegBinEdges, p, ::Nothing)
     buffers = (;

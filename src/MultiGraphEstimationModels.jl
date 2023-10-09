@@ -415,9 +415,13 @@ fit_model(dist::AbstractEdgeDistribution, observed, covariates; kwargs...)
 
 Fit a `covariates`-based model to the `observed` data assuming a `dist` edge distribution.
 """
-function fit_model(dist::AbstractEdgeDistribution, observed, covariates; kwargs...)
+function fit_model(dist::AbstractEdgeDistribution, observed, covariates; directed::Bool=false, kwargs...)
     #
-    model = UndirectedMultiGraphModel(dist, observed, covariates)
+    if directed
+        model = DirectedMultiGraphModel(dist, observed, covariates)
+    else
+        model = UndirectedMultiGraphModel(dist, observed, covariates)
+    end
     fit_model(model; kwargs...)
 end
 

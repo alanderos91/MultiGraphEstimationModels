@@ -31,7 +31,7 @@ end
 
 function Base.show(io::IO, model::UndirectedMultiGraphModel{distT,intT,floatT}) where {distT,intT,floatT}
     nnodes = length(model.propensity)
-    ncovar = model.coefficient isa Nothing ? 0 : length(model.coefficient)
+    ncovar = model.coefficient isa Nothing ? 0 : length(model.coefficient) - nnodes
 
     print(io, "UndirectedMultiGraphModel{$(intT),$(floatT)}:")
     print(io, "\n  - distribution: $(distT)")
@@ -158,17 +158,25 @@ function __eval_derivs!__(::NegBinEdges{MeanDispersion}, model::UndirectedMultiG
 end
 
 function approx_standard_errors(model::UndirectedMultiGraphModel{distT}, option::Symbol) where distT
+    m = length(model.propensity)
+    N = div(count(>(0), model.observed), 2)
     if option == :propensity
         expected_information = propensity_expected_information(distT(), model)
+        Iinv = inv(Symmetric(expected_information))
     else option == :coefficient
         if isnothing(model.covariate)
             error("Model does not contain any covariates! Did you mean to estimate standard errors for each `:propensity`?")
         end
+        ncovar = size(model.covariate, 1) - m
         tmp = __allocate_buffers__(model)
         __eval_derivs!__(distT(), model, tmp)
-        expected_information = tmp.hessian
+        expected_information = Symmetric(tmp.hessian)
+        D = Diagonal([norm(v) for v in eachcol(expected_information)])
+        s, V = eigen(Symmetric(inv(D) * expected_information))
+        Iinv = inv(D) * V*inv(Diagonal(abs.(s)))*V'
+        Iinv = Iinv[1:ncovar, 1:ncovar]
     end
-    return sqrt.(diag(inv(expected_information)))
+    return sqrt.(diag(Iinv) ./ (N-1))
 end
 
 function propensity_expected_information(::PoissonEdges, model::UndirectedMultiGraphModel)
@@ -279,10 +287,10 @@ function init_model(::PoissonEdges, model::UndirectedMultiGraphModel)
     model.propensity .= sqrt( sum_Z / (m * (m-1)) )
     if !(model.covariate isa Nothing)
         # initialize with rough estimates of propensities under Poisson model without covariates
+        d = size(model.covariate, 1) - m
         result = fit_model(PoissonEdges(), model.observed; maxiter=5, verbose=false)
-        A = copy(model.covariate)           # LHS
-        b = log.(result.fitted.propensity)  # RHS
-        model.coefficient .= A' \ b
+        model.coefficient[1:d] .= 0
+        model.coefficient[(d+1):end] .= log.(result.fitted.propensity)
     end
     update_expectations!(model)
     return model
@@ -295,10 +303,11 @@ function init_model(::NegBinEdges, model::UndirectedMultiGraphModel)
         copyto!(model.propensity, result.fitted.propensity)
     else
         # initialize with rough estimates of propensities under negative binomial model without covariates
+        m = length(model.propensity)
+        d = size(model.covariate, 1) - m
         result = fit_model(NegBinEdges(), model.observed; maxiter=5, verbose=false)
-        A = copy(model.covariate)           # LHS
-        b = log.(result.fitted.propensity)  # RHS
-        model.coefficient .= A' \ b
+        model.coefficient[1:d] .= 0
+        model.coefficient[(d+1):end] .= log.(result.fitted.propensity)
     end
     update_expectations!(model)
 

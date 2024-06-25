@@ -173,10 +173,11 @@ function simulate_covariate_model(::PoissonEdges, nnodes::Int, ncovar::Int;
     μ = mean(design_matrix, dims=2)
     σ = std(design_matrix, dims=2)
     covariate = (design_matrix .- μ) ./ σ
+    covariate = [covariate; I(nnodes)]
 
     # approximately generate coefficients that produce the target propensity values
     response = log.(propensity)
-    coefficient = covariate' \ (log(10, nnodes) * response)
+    coefficient = covariate' \ response
 
     # simulate propensities
     _propensity = @views [min(625.0, exp(dot(covariate[:,i], coefficient))) for i in 1:nnodes]
@@ -210,10 +211,11 @@ function simulate_covariate_model(dist::NegBinEdges, nnodes::Int, ncovar::Int;
     μ = mean(design_matrix, dims=2)
     σ = std(design_matrix, dims=2)
     covariate = (design_matrix .- μ) ./ σ
+    covariate = [covariate; I(nnodes)]
 
     # approximately generate coefficients that produce the target propensity values
     response = log.(propensity)
-    coefficient = covariate' \ (log(10, nnodes) * response)
+    coefficient = covariate' \ response
 
     # simulate propensities
     _propensity = @views [min(625.0, exp(dot(covariate[:,i], coefficient))) for i in 1:nnodes]

@@ -162,19 +162,15 @@ function approx_standard_errors(model::UndirectedMultiGraphModel{distT}, option:
     N = div(count(>(0), model.observed), 2)
     if option == :propensity
         expected_information = propensity_expected_information(distT(), model)
-        Iinv = inv(Symmetric(expected_information))
     else option == :coefficient
         if isnothing(model.covariate)
             error("Model does not contain any covariates! Did you mean to estimate standard errors for each `:propensity`?")
         end
-        ncoeff = size(model.covariate, 1)
-        ncovar = ncoeff - m
         expected_information = covariate_expected_information(distT(), model)
-        D = Diagonal([norm(v) for v in eachcol(expected_information)])
-        s, V = eigen(Symmetric(inv(D) * expected_information))
-        Iinv = inv(D) * V*inv(Diagonal(abs.(s)))*V'
-        # Iinv = Iinv[1:ncovar, 1:ncovar]
     end
+    D = Diagonal([norm(v) for v in eachcol(expected_information)])
+    s, V = eigen(Symmetric(inv(D) * expected_information))
+    Iinv = inv(D) * V*inv(Diagonal(abs.(s)))*V'
     return sqrt.(diag(Iinv))
 end
 
@@ -220,26 +216,7 @@ function propensity_expected_information(::NegBinEdges{MeanScale}, model::Undire
 end
 
 function propensity_expected_information(::NegBinEdges{MeanDispersion}, model::UndirectedMultiGraphModel)
-    p = model.propensity
-    m = length(p)
-    a = model.parameters.dispersion
-    E = Matrix{Float64}(undef, m, m)
-    for j in axes(E, 2), i in axes(E, 1)
-        if i == j
-            sum_p_weighted = 0.0
-            for k in axes(E, 1)
-                mu_ki = model.expected[k,i]
-                pi_ki = a*mu_ki / (a*mu_ki + 1)
-                sum_p_weighted += p[k] * (1 - pi_ki)
-            end
-            E[i,i] = 2 / p[i] * sum_p_weighted
-        else
-            mu_ij = model.expected[i,j]
-            pi_ij = a*mu_ij / (a*mu_ij + 1)
-            E[i,j] = 2 * (1 - pi_ij)
-        end
-    end
-    return E
+    return propensity_expected_information(NegBinEdges{MeanScale}(), model)
 end
 
 function covariate_expected_information(::PoissonEdges, model::UndirectedMultiGraphModel)
@@ -267,6 +244,10 @@ function covariate_expected_information(::NegBinEdges{MeanScale}, model::Undirec
     end
     expected_information[end,end] = d2ldr2
     return expected_information
+end
+
+function covariate_expected_information(::NegBinEdges{MeanDispersion}, model::UndirectedMultiGraphModel)
+    return covariate_expected_information(NegBinEdges{MeanScale}(), model)
 end
 
 function init_buffers!(model::UndirectedMultiGraphModel, buffers)
